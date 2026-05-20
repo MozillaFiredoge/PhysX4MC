@@ -1,0 +1,89 @@
+package com.firedoge.px4mc.platform.neoforge;
+
+import com.firedoge.px4mc.PhysX4mc;
+import com.firedoge.px4mc.backend.physx.PhysXBackend;
+import com.firedoge.px4mc.command.Px4mcCommands;
+import com.firedoge.px4mc.minecraft.scene.ServerPhysicsRuntime;
+import com.firedoge.px4mc.physics.PhysicsManager;
+
+import net.minecraft.core.Direction;
+import net.minecraft.server.level.ServerLevel;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import net.neoforged.neoforge.event.level.BlockEvent;
+import net.neoforged.neoforge.event.level.ChunkEvent;
+import net.neoforged.neoforge.event.server.ServerStartingEvent;
+import net.neoforged.neoforge.event.server.ServerStoppedEvent;
+import net.neoforged.neoforge.event.server.ServerStoppingEvent;
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
+
+public final class NeoForgeEvents {
+    @SubscribeEvent
+    public void onRegisterCommands(RegisterCommandsEvent event) {
+        Px4mcCommands.register(event);
+    }
+
+    @SubscribeEvent
+    public void onServerStarting(ServerStartingEvent event) {
+        boolean physxAvailable = PhysicsManager.INSTANCE.backend(PhysXBackend.ID)
+                .map(backend -> backend.isAvailable())
+                .orElse(false);
+        PhysX4mc.LOGGER.info("PhysX4mc server hooks ready; PhysX native loaded={}", physxAvailable);
+    }
+
+    @SubscribeEvent
+    public void onServerTick(ServerTickEvent.Post event) {
+        ServerPhysicsRuntime.INSTANCE.tick(event.getServer());
+    }
+
+    @SubscribeEvent
+    public void onChunkUnload(ChunkEvent.Unload event) {
+        if (event.getLevel() instanceof ServerLevel level) {
+            int removed = ServerPhysicsRuntime.INSTANCE.unloadChunkCollision(level, event.getChunk().getPos().toLong());
+            if (removed > 0) {
+                PhysX4mc.LOGGER.debug("Released {} physics terrain colliders for chunk {}", removed, event.getChunk().getPos());
+            }
+        }
+    }
+
+    @SubscribeEvent
+    public void onNeighborNotify(BlockEvent.NeighborNotifyEvent event) {
+        if (event.getLevel() instanceof ServerLevel level) {
+            ServerPhysicsRuntime.INSTANCE.updateTerrainCollisionAt(level, event.getPos());
+            for (Direction side : event.getNotifiedSides()) {
+                ServerPhysicsRuntime.INSTANCE.updateTerrainCollisionAt(level, event.getPos().relative(side));
+            }
+        }
+    }
+
+    @SubscribeEvent
+    public void onBlockBreak(BlockEvent.BreakEvent event) {
+        if (event.getLevel() instanceof ServerLevel level) {
+            ServerPhysicsRuntime.INSTANCE.removeTerrainCollisionAt(level, event.getPos());
+        }
+    }
+
+    @SubscribeEvent
+    public void onBlockPlace(BlockEvent.EntityPlaceEvent event) {
+        if (event.getLevel() instanceof ServerLevel level) {
+            ServerPhysicsRuntime.INSTANCE.updateTerrainCollisionAt(level, event.getPos());
+        }
+    }
+
+    @SubscribeEvent
+    public void onFluidPlaceBlock(BlockEvent.FluidPlaceBlockEvent event) {
+        if (event.getLevel() instanceof ServerLevel level) {
+            ServerPhysicsRuntime.INSTANCE.updateTerrainCollisionAt(level, event.getPos());
+        }
+    }
+
+    @SubscribeEvent
+    public void onServerStopping(ServerStoppingEvent event) {
+        ServerPhysicsRuntime.INSTANCE.close(event.getServer());
+    }
+
+    @SubscribeEvent
+    public void onServerStopped(ServerStoppedEvent event) {
+        ServerPhysicsRuntime.INSTANCE.close();
+    }
+}

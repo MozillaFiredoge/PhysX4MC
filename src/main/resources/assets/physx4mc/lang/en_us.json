@@ -1,0 +1,10 @@
+{
+  "physx4mc.configuration.title": "PhysX4mc Configs",
+  "physx4mc.configuration.section.physx4mc.common.toml": "PhysX4mc Configs",
+  "physx4mc.configuration.section.physx4mc.common.toml.title": "PhysX4mc Configs",
+  "physx4mc.configuration.loadNativeOnStartup": "Load Native Backend On Startup",
+  "physx4mc.configuration.defaultBackend": "Default Physics Backend",
+  "physx4mc.configuration.fixedTimeStep": "Fixed Physics Time Step",
+  "physx4mc.configuration.maxSubSteps": "Maximum Physics Substeps",
+  "physx4mc.configuration.debugLogging": "Debug Physics Logging"
+}
