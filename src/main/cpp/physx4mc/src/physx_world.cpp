@@ -3,8 +3,8 @@
 #include "px4mc/physx_context.hpp"
 
 namespace px4mc {
-WorldHandle create_world(double gravity_x, double gravity_y, double gravity_z, float fixed_time_step, int max_sub_steps) {
-    return context().create_world(gravity_x, gravity_y, gravity_z, fixed_time_step, max_sub_steps);
+WorldHandle create_world(double gravity_x, double gravity_y, double gravity_z, float fixed_time_step, int max_sub_steps, bool enable_gpu_dynamics) {
+    return context().create_world(gravity_x, gravity_y, gravity_z, fixed_time_step, max_sub_steps, enable_gpu_dynamics);
 }
 
 void destroy_world(WorldHandle handle) {
@@ -13,6 +13,14 @@ void destroy_world(WorldHandle handle) {
 
 void step_world(WorldHandle handle, float delta_seconds) {
     context().step_world(handle, delta_seconds);
+}
+
+bool is_world_gpu_dynamics_enabled(WorldHandle handle) {
+    return context().is_world_gpu_dynamics_enabled(handle);
+}
+
+std::string world_gpu_dynamics_status(WorldHandle handle) {
+    return context().world_gpu_dynamics_status(handle);
 }
 
 std::uint64_t create_box_shape(WorldHandle world, float half_extent_x, float half_extent_y, float half_extent_z) {

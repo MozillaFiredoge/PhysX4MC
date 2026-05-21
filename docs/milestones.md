@@ -282,6 +282,148 @@ box with matching proxy scale, and `/px4mc set_velocity <x> <y> <z>` sets the
 linear velocity of the nearest dynamic box within 32 blocks. Details are in
 `docs/dynamic-body-controls.md`.
 
+## M13: Debug Object Management
+
+Goal: make active dynamic debug bodies manageable without clearing the whole
+dimension.
+
+- Add a command to list dynamic debug boxes in the current level.
+- Sort listed boxes by distance from the command source.
+- Add a command to remove the nearest dynamic debug box.
+- Add a command to remove a dynamic debug box by object id prefix.
+- When removing a dynamic box, close the PhysX object and discard its
+  `BlockDisplay` proxy.
+- Keep terrain colliders untouched during individual debug object removal.
+
+Acceptance: testers can spawn several debug boxes, list them, remove one by
+nearest distance or id prefix, and observe `physics_status` decrement
+`dynamicBoxes`, `objects`, and `boundEntities` without dropping cached terrain
+colliders.
+
+Status: implemented. `/px4mc list_boxes [limit]`, `/px4mc remove_nearest
+[maxDistance]`, and `/px4mc remove_box <idPrefix>` manage dynamic debug boxes
+inside the current level. Details are in `docs/debug-object-management.md`.
+
+## M14: Cross-Platform Native Build Entry Points
+
+Goal: make the JNI bridge CMake project portable enough that Windows and macOS
+native builds do not require rewriting `CMakeLists.txt`.
+
+- Detect the PhysX platform binary directory from the CMake host platform.
+- Keep `PHYSX_LIB_DIR` as an explicit override for unusual local installs.
+- Add platform-specific PhysX install hints for Linux, Windows, and macOS.
+- Link platform system libraries through CMake platform branches instead of
+  hardcoding Linux `dl` and `pthread`.
+- Keep Gradle native packaging opt-in and Linux-only until other platforms are
+  validated.
+
+Acceptance: the existing Linux native smoke test still passes, Windows/macOS
+helpers can invoke the same CMake project with platform overrides, and normal
+`./gradlew build` remains Java-only.
+
+Status: implemented at the build-entry level. Linux was verified locally through
+`./gradlew nativeSmokeTest`; Windows and macOS CMake paths are prepared but
+still require local platform validation before jar packaging tasks are added.
+Details are in `docs/native-packaging.md`.
+
+## M15: GPU Dynamics Stress Path
+
+Goal: make PhysX GPU rigid body dynamics testable under many-body load without
+Minecraft render proxies dominating the result.
+
+- Add an opt-in config flag for requesting `PxSceneFlag::eENABLE_GPU_DYNAMICS`
+  on newly created PhysX scenes.
+- Create one shared CUDA context manager when the local PhysX build and driver
+  support GPU dynamics.
+- Use GPU broadphase for GPU scenes, and fall back to CPU scenes if GPU setup
+  fails.
+- Create physics scenes lazily instead of pre-creating one scene for every
+  loaded dimension during server tick.
+- Report both requested GPU dynamics and actually enabled GPU scene count in
+  `/px4mc physics_status`.
+- Add a physics-only stress-grid command that creates dynamic boxes without
+  `BlockDisplay` proxies.
+- Copy `PhysXGpu` runtime artifacts into native output when CMake can find
+  them.
+
+Acceptance: testers can enable `enableGpuDynamics`, restart the world, confirm
+`gpuRequested=true` and `gpuScenes>0` after creating a physics scene, then run
+`/px4mc spawn_stress_grid <countX> <countY> <countZ> [spacing] [size] [mass]`
+to compare CPU and GPU dynamics behavior. CPU fallback remains usable and is
+visible as `gpuRequested=true, gpuScenes=0`.
+
+Status: implemented. Details are in `docs/gpu-dynamics.md`.
+
+## M16: Runtime Profiling
+
+Goal: make server-side physics tick costs visible before optimizing the wrong
+layer.
+
+- Measure total time spent inside `ServerPhysicsRuntime.tick`.
+- Split the tick into active-object terrain queueing, terrain queue processing,
+  scene stepping, and debug entity sync.
+- Keep the existing native scene step metric for comparison.
+- Count active-object snapshots, dynamic bodies found during the active scan,
+  terrain chunks queued, synced debug entities, and entity pose syncs.
+- Report the metrics through `/px4mc physics_status`.
+
+Acceptance: a tester can distinguish native PhysX step cost from Java/JNI
+snapshot readback, terrain queueing, and Minecraft debug entity sync cost.
+
+Status: implemented. Details are in `docs/runtime-profiling.md`.
+
+## M17: Many-Body Runtime Stress Pass
+
+Goal: validate many dynamic PhysX bodies under Minecraft server tick load, while
+separating solver cost from terrain queueing and debug proxy synchronization.
+
+- Use physics-only stress grids to test solver throughput without Minecraft
+  entity overhead.
+- Use visible `BlockDisplay` proxies to measure the cost of debug visualization
+  separately from the native PhysX step.
+- Round-robin debug proxy sync and skip unchanged position-only proxy writes.
+- Budget active-object terrain scans instead of reading every dynamic body pose
+  every tick.
+- Skip active terrain queueing for bodies far outside Minecraft build height.
+- Report active terrain scan budget, height skips, proxy sync counts, and sync
+  sub-timings in `/px4mc physics_status`.
+
+Acceptance: thousands of dynamic boxes can be kept in one server scene, with
+`lastSyncEntitiesMs` reduced below the native solver step cost and
+`lastQueueActiveMs` bounded by `activeTerrainMaxScansPerTick`. The status log
+should make the remaining bottleneck obvious.
+
+Status: passed for the current debug/stress scope. A representative run with
+4,444 dynamic boxes reported roughly `lastTickMs=11.961`,
+`lastStepPhaseMs=9.450`, `lastQueueActiveMs=1.919`, and
+`lastSyncEntitiesMs=0.579`, showing that the main remaining cost is the PhysX
+solver step rather than Minecraft proxy synchronization. This does not imply
+that real gameplay should use thousands of visible Minecraft entities.
+
+## M18: Gameplay Physics Boundary Prototype
+
+Goal: move from debug bodies and stress tests toward a gameplay-facing physics
+object model.
+
+- Separate debug/stress bodies from gameplay physics objects in the scene layer.
+- Define which Minecraft state is authoritative for a gameplay object:
+  block state, entity state, or a physics-owned assembly.
+- Prototype one small physics block assembly: remove a few blocks from the
+  world, create one PhysX body or compound representation, drive a lightweight
+  render proxy, then settle or remove it cleanly.
+- Add lifecycle rules for objects that fall out of world bounds, go to sleep,
+  unload with chunks, or need to be converted back into blocks.
+- Keep the first prototype single-level and server-authored before revisiting a
+  full Sable-style sublevel grid.
+
+Acceptance: a small gameplay object can be spawned from Minecraft state,
+simulated by PhysX, inspected through `/px4mc physics_status`, and cleaned up
+without leaving orphaned bodies, proxies, or terrain colliders.
+
+Status: recommended next. This phase should answer what the mod actually wants
+from physics before investing in thousands of visible entity proxies or a full
+sublevel implementation.
+
 ## First Target
 
 The recommended first vertical slice is:

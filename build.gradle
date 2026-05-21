@@ -209,8 +209,10 @@ tasks.register('copyNativeLinux', Copy) {
     group = 'build'
     description = 'Copies the Linux native bridge into generated jar resources.'
     dependsOn tasks.named('buildNativeLinux')
-    from nativeLinuxLibrary
+    from layout.buildDirectory.dir('native/linux-x86_64')
     into layout.buildDirectory.dir('generated/nativeResources/native/linux-x86_64')
+    include 'libphysx4mc_native.so'
+    include 'libPhysXGpu_64.so'
     includeEmptyDirs = false
 }
 

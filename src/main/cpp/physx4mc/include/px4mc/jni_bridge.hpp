@@ -15,7 +15,8 @@ JNIEXPORT jlong JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_native
     jdouble gravity_y,
     jdouble gravity_z,
     jfloat fixed_time_step,
-    jint max_sub_steps
+    jint max_sub_steps,
+    jboolean enable_gpu_dynamics
 );
 
 JNIEXPORT void JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_nativeDestroyWorld(
@@ -29,6 +30,18 @@ JNIEXPORT void JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_nativeS
     jclass type,
     jlong world_handle,
     jfloat delta_seconds
+);
+
+JNIEXPORT jboolean JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_nativeIsWorldGpuDynamicsEnabled(
+    JNIEnv* env,
+    jclass type,
+    jlong world_handle
+);
+
+JNIEXPORT jstring JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_nativeGetWorldGpuDynamicsStatus(
+    JNIEnv* env,
+    jclass type,
+    jlong world_handle
 );
 
 JNIEXPORT jlong JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_nativeCreateBoxShape(

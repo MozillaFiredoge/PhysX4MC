@@ -45,3 +45,5 @@ This makes it easier to test:
 - `set_velocity` targets nearest dynamic box by distance, not by explicit id.
 - There is no angular velocity or impulse command yet.
 - Mass and size are not persisted beyond the active runtime scene.
+- Individual debug object listing and removal are covered by M13 in
+  `docs/debug-object-management.md`.

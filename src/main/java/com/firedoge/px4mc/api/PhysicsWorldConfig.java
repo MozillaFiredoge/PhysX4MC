@@ -2,8 +2,12 @@ package com.firedoge.px4mc.api;
 
 import java.util.Objects;
 
-public record PhysicsWorldConfig(PhysicsVector gravity, float fixedTimeStep, int maxSubSteps) {
-    public static final PhysicsWorldConfig DEFAULT = new PhysicsWorldConfig(PhysicsVector.MC_GRAVITY, 1.0F / 20.0F, 4);
+public record PhysicsWorldConfig(PhysicsVector gravity, float fixedTimeStep, int maxSubSteps, boolean enableGpuDynamics) {
+    public static final PhysicsWorldConfig DEFAULT = new PhysicsWorldConfig(PhysicsVector.MC_GRAVITY, 1.0F / 20.0F, 4, false);
+
+    public PhysicsWorldConfig(PhysicsVector gravity, float fixedTimeStep, int maxSubSteps) {
+        this(gravity, fixedTimeStep, maxSubSteps, false);
+    }
 
     public PhysicsWorldConfig {
         Objects.requireNonNull(gravity, "gravity");

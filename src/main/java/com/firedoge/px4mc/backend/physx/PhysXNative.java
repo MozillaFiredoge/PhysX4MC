@@ -22,11 +22,15 @@ public final class PhysXNative {
 
     static native boolean nativeIsPhysXLinked();
 
-    static native long nativeCreateWorld(double gravityX, double gravityY, double gravityZ, float fixedTimeStep, int maxSubSteps);
+    static native long nativeCreateWorld(double gravityX, double gravityY, double gravityZ, float fixedTimeStep, int maxSubSteps, boolean enableGpuDynamics);
 
     static native void nativeDestroyWorld(long worldHandle);
 
     static native void nativeStepWorld(long worldHandle, float deltaSeconds);
+
+    static native boolean nativeIsWorldGpuDynamicsEnabled(long worldHandle);
+
+    static native String nativeGetWorldGpuDynamicsStatus(long worldHandle);
 
     static native long nativeCreateBoxShape(long worldHandle, float halfExtentX, float halfExtentY, float halfExtentZ);
 

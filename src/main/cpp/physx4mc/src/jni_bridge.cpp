@@ -16,14 +16,16 @@ JNIEXPORT jlong JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_native
     jdouble gravity_y,
     jdouble gravity_z,
     jfloat fixed_time_step,
-    jint max_sub_steps
+    jint max_sub_steps,
+    jboolean enable_gpu_dynamics
 ) {
     return static_cast<jlong>(px4mc::create_world(
         gravity_x,
         gravity_y,
         gravity_z,
         fixed_time_step,
-        max_sub_steps
+        max_sub_steps,
+        enable_gpu_dynamics == JNI_TRUE
     ));
 }
 
@@ -42,6 +44,22 @@ JNIEXPORT void JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_nativeS
     jfloat delta_seconds
 ) {
     px4mc::step_world(static_cast<px4mc::WorldHandle>(world_handle), delta_seconds);
+}
+
+JNIEXPORT jboolean JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_nativeIsWorldGpuDynamicsEnabled(
+    JNIEnv*,
+    jclass,
+    jlong world_handle
+) {
+    return px4mc::is_world_gpu_dynamics_enabled(static_cast<px4mc::WorldHandle>(world_handle)) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jstring JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_nativeGetWorldGpuDynamicsStatus(
+    JNIEnv* env,
+    jclass,
+    jlong world_handle
+) {
+    return env->NewStringUTF(px4mc::world_gpu_dynamics_status(static_cast<px4mc::WorldHandle>(world_handle)).c_str());
 }
 
 JNIEXPORT jlong JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_nativeCreateBoxShape(

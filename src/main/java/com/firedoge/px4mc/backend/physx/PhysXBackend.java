@@ -31,7 +31,8 @@ public final class PhysXBackend implements PhysicsBackend {
                 config.gravity().y(),
                 config.gravity().z(),
                 config.fixedTimeStep(),
-                config.maxSubSteps()
+                config.maxSubSteps(),
+                config.enableGpuDynamics()
         );
         return new PhysXWorld(handle, config);
     }

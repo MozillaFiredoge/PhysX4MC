@@ -36,6 +36,14 @@ public final class ServerPhysicsScene implements AutoCloseable {
         return objects.size();
     }
 
+    public boolean gpuDynamicsEnabled() {
+        return !closed && world.gpuDynamicsEnabled();
+    }
+
+    public String gpuDynamicsStatus() {
+        return closed ? "closed" : world.gpuDynamicsStatus();
+    }
+
     public PhysicsObject createStaticPlane(PhysicsVector normal, double distance) {
         ensureOpen();
         PhysicsBody body = world.createStaticPlane(normal, distance);
@@ -76,6 +84,22 @@ public final class ServerPhysicsScene implements AutoCloseable {
     public Collection<PhysicsObjectSnapshot> snapshots() {
         return objects.values().stream()
                 .map(PhysicsObject::snapshot)
+                .toList();
+    }
+
+    public Collection<PhysicsObjectSnapshot> snapshotsOfType(PhysicsObjectType type) {
+        Objects.requireNonNull(type, "type");
+        return objects.values().stream()
+                .filter(object -> object.type() == type)
+                .map(PhysicsObject::snapshot)
+                .toList();
+    }
+
+    public List<PhysicsObject> objectsOfType(PhysicsObjectType type) {
+        Objects.requireNonNull(type, "type");
+        return objects.values().stream()
+                .filter(object -> object.type() == type)
+                .map(PhysicsObject.class::cast)
                 .toList();
     }
 

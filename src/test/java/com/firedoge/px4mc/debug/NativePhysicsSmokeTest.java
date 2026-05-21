@@ -22,6 +22,7 @@ public final class NativePhysicsSmokeTest {
     public static void main(String[] args) {
         runMinimalLoop();
         runLifecycleChecks();
+        runGpuDynamicsRequestCheck();
         runSceneLayerChecks();
         System.out.println("Native physics lifecycle checks passed");
         System.out.println("Physics scene layer checks passed");
@@ -97,6 +98,26 @@ public final class NativePhysicsSmokeTest {
         assertTrue(second.isClosed(), "World close should close remaining dynamic bodies");
 
         expectThrows(() -> world.step(1.0F / 60.0F), "Closed world should reject simulation steps");
+    }
+
+    private static void runGpuDynamicsRequestCheck() {
+        PhysXBackend backend = new PhysXBackend();
+        try (PhysicsWorld world = backend.createWorld(new PhysicsWorldConfig(PhysicsVector.MC_GRAVITY, 1.0F / 60.0F, 1, true))) {
+            try (PhysicsShape boxShape = world.createBoxShape(0.5F, 0.5F, 0.5F);
+                 PhysicsBody box = world.createBody(RigidBodyDefinition.dynamic(
+                         new PhysicsPose(new PhysicsVector(0.0D, 3.0D, 0.0D), PhysicsQuaternion.IDENTITY),
+                         boxShape,
+                         1.0F
+                 ))) {
+                double initialY = box.pose().position().y();
+                for (int i = 0; i < 10; i++) {
+                    world.step(1.0F / 60.0F);
+                }
+                assertTrue(box.pose().position().y() < initialY, "GPU-requested world should simulate or fall back to CPU");
+                System.out.println("GPU dynamics request check passed: enabled=" + world.gpuDynamicsEnabled()
+                        + " status=" + world.gpuDynamicsStatus());
+            }
+        }
     }
 
     private static void runSceneLayerChecks() {

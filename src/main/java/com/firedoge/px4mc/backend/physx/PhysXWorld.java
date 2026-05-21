@@ -134,6 +134,16 @@ public final class PhysXWorld implements PhysicsWorld {
     }
 
     @Override
+    public boolean gpuDynamicsEnabled() {
+        return !closed && PhysXNative.nativeIsWorldGpuDynamicsEnabled(nativeHandle);
+    }
+
+    @Override
+    public String gpuDynamicsStatus() {
+        return closed ? "closed" : PhysXNative.nativeGetWorldGpuDynamicsStatus(nativeHandle);
+    }
+
+    @Override
     public boolean isClosed() {
         return closed;
     }

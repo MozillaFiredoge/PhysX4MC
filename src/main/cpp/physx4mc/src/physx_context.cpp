@@ -62,6 +62,9 @@ PhysXContext::~PhysXContext() {
         release_world(*entry.second);
     }
     worlds_.clear();
+#if PX_SUPPORT_GPU_PHYSX
+    release_px(cuda_context_manager_);
+#endif
     release_px(physics_);
     release_px(foundation_);
 #endif
@@ -71,7 +74,7 @@ std::uint64_t PhysXContext::next_handle() {
     return next_handle_.fetch_add(1, std::memory_order_relaxed);
 }
 
-WorldHandle PhysXContext::create_world(double gravity_x, double gravity_y, double gravity_z, float, int) {
+WorldHandle PhysXContext::create_world(double gravity_x, double gravity_y, double gravity_z, float, int, bool enable_gpu_dynamics) {
     std::lock_guard<std::mutex> lock(mutex_);
 
 #if PX4MC_WITH_PHYSX
@@ -80,19 +83,65 @@ WorldHandle PhysXContext::create_world(double gravity_x, double gravity_y, doubl
     }
 
     auto world = std::make_unique<WorldState>();
-    physx::PxSceneDesc scene_desc(physics_->getTolerancesScale());
-    scene_desc.gravity = physx::PxVec3(
-        static_cast<physx::PxReal>(gravity_x),
-        static_cast<physx::PxReal>(gravity_y),
-        static_cast<physx::PxReal>(gravity_z)
-    );
+    world->gpu_dynamics_requested = enable_gpu_dynamics;
+    world->gpu_dynamics_status = enable_gpu_dynamics ? "requested" : "not_requested";
     world->dispatcher = physx::PxDefaultCpuDispatcherCreate(2);
-    scene_desc.cpuDispatcher = world->dispatcher;
-    scene_desc.filterShader = physx::PxDefaultSimulationFilterShader;
+    if (world->dispatcher == nullptr) {
+        release_world(*world);
+        return 0;
+    }
+
+    auto make_scene_desc = [&]() {
+        physx::PxSceneDesc scene_desc(physics_->getTolerancesScale());
+        scene_desc.gravity = physx::PxVec3(
+            static_cast<physx::PxReal>(gravity_x),
+            static_cast<physx::PxReal>(gravity_y),
+            static_cast<physx::PxReal>(gravity_z)
+        );
+        scene_desc.cpuDispatcher = world->dispatcher;
+        scene_desc.filterShader = physx::PxDefaultSimulationFilterShader;
+        return scene_desc;
+    };
+
+    physx::PxSceneDesc scene_desc = make_scene_desc();
+    bool gpu_scene_requested = false;
+    if (enable_gpu_dynamics) {
+#if PX_SUPPORT_GPU_PHYSX
+        std::string cuda_status;
+        if (ensure_cuda_context_manager(cuda_status)) {
+            scene_desc.cudaContextManager = cuda_context_manager_;
+            scene_desc.flags |= physx::PxSceneFlag::eENABLE_GPU_DYNAMICS;
+            scene_desc.flags |= physx::PxSceneFlag::eENABLE_STABILIZATION;
+            scene_desc.broadPhaseType = physx::PxBroadPhaseType::eGPU;
+            scene_desc.gpuMaxNumPartitions = 8;
+            scene_desc.solverType = physx::PxSolverType::eTGS;
+            gpu_scene_requested = true;
+            world->gpu_dynamics_status = "gpu_scene_requested";
+        } else {
+            world->gpu_dynamics_status = cuda_status;
+        }
+#else
+        world->gpu_dynamics_status = "unsupported_platform";
+#endif
+    }
+
     world->scene = physics_->createScene(scene_desc);
+    if (world->scene == nullptr && gpu_scene_requested) {
+        gpu_scene_requested = false;
+        world->gpu_dynamics_status = "gpu_scene_create_failed_cpu_fallback";
+        physx::PxSceneDesc cpu_scene_desc = make_scene_desc();
+        world->scene = physics_->createScene(cpu_scene_desc);
+    }
+    world->gpu_dynamics_enabled = gpu_scene_requested && world->scene != nullptr;
+    if (world->gpu_dynamics_enabled) {
+        world->gpu_dynamics_status = "enabled";
+#if PX_SUPPORT_GPU_PHYSX
+        gpu_world_count_++;
+#endif
+    }
     world->material = physics_->createMaterial(0.6f, 0.6f, 0.0f);
 
-    if (world->dispatcher == nullptr || world->scene == nullptr || world->material == nullptr) {
+    if (world->scene == nullptr || world->material == nullptr) {
         release_world(*world);
         return 0;
     }
@@ -134,6 +183,32 @@ void PhysXContext::step_world(WorldHandle handle, float delta_seconds) {
     }
     scene->simulate(delta_seconds);
     scene->fetchResults(true);
+#endif
+}
+
+bool PhysXContext::is_world_gpu_dynamics_enabled(WorldHandle handle) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto found = worlds_.find(handle);
+    if (found == worlds_.end()) {
+        return false;
+    }
+#if PX4MC_WITH_PHYSX
+    return found->second->gpu_dynamics_enabled;
+#else
+    return false;
+#endif
+}
+
+std::string PhysXContext::world_gpu_dynamics_status(WorldHandle handle) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto found = worlds_.find(handle);
+    if (found == worlds_.end()) {
+        return "unknown_world";
+    }
+#if PX4MC_WITH_PHYSX
+    return found->second->gpu_dynamics_status;
+#else
+    return "physx_not_linked";
 #endif
 }
 
@@ -381,10 +456,59 @@ bool PhysXContext::ensure_initialized() {
     return true;
 }
 
+#if PX_SUPPORT_GPU_PHYSX
+bool PhysXContext::ensure_cuda_context_manager(std::string& status) {
+    if (cuda_context_manager_ != nullptr) {
+        status = "shared_cuda_context_ready";
+        return true;
+    }
+    if (cuda_context_manager_attempted_) {
+        status = cuda_context_manager_status_;
+        return false;
+    }
+
+    cuda_context_manager_attempted_ = true;
+    physx::PxCudaContextManagerDesc cuda_desc;
+    cuda_context_manager_ = PxCreateCudaContextManager(*foundation_, cuda_desc);
+    if (cuda_context_manager_ == nullptr) {
+        cuda_context_manager_status_ = "cuda_context_manager_unavailable";
+        status = cuda_context_manager_status_;
+        return false;
+    }
+    if (!cuda_context_manager_->contextIsValid()) {
+        release_px(cuda_context_manager_);
+        cuda_context_manager_status_ = "cuda_context_invalid";
+        status = cuda_context_manager_status_;
+        return false;
+    }
+
+    cuda_context_manager_status_ = "shared_cuda_context_ready";
+    status = cuda_context_manager_status_;
+    return true;
+}
+#else
+bool PhysXContext::ensure_cuda_context_manager(std::string& status) {
+    status = "unsupported_platform";
+    return false;
+}
+#endif
+
 void PhysXContext::release_world(WorldState& world) {
     release_px(world.scene);
     release_px(world.material);
     release_px(world.dispatcher);
+#if PX_SUPPORT_GPU_PHYSX
+    if (world.gpu_dynamics_enabled) {
+        world.gpu_dynamics_enabled = false;
+        gpu_world_count_--;
+        if (gpu_world_count_ <= 0) {
+            gpu_world_count_ = 0;
+            release_px(cuda_context_manager_);
+            cuda_context_manager_attempted_ = false;
+            cuda_context_manager_status_ = "not_requested";
+        }
+    }
+#endif
 }
 #endif
 

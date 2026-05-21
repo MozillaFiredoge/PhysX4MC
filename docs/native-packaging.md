@@ -22,11 +22,101 @@ build/native/linux-x86_64/libphysx4mc_native.so
 build/generated/nativeResources/native/linux-x86_64/libphysx4mc_native.so
 ```
 
+If the native build output also contains `libPhysXGpu_64.so`, `copyNativeLinux`
+includes it in the same resource directory so opt-in GPU dynamics can find the
+PhysX GPU runtime.
+
 When `-Pphysx4mc.bundleNativeLinux=true` is set, `processResources` depends on
 `copyNativeLinux`, so the final jar includes the Linux native library.
 
 A normal `./gradlew build` does not require a local PhysX checkout and does not
 bundle native libraries. This keeps CI and first-commit validation lightweight.
+
+## Native CMake Builds
+
+The JNI bridge CMake project is platform-aware. It derives the expected PhysX
+binary directory from the host platform:
+
+```text
+Linux x86_64:   linux.x86_64
+Windows x86_64: win.x86_64.<vc compiler>.<crt>
+macOS x86_64:   mac.x86_64
+macOS arm64:    mac.arm64
+```
+
+The expected PhysX directory can be overridden when a local PhysX build uses a
+different output name:
+
+```text
+PHYSX_CONFIG=release
+PHYSX_PLATFORM_BIN_NAME=win.x86_64.vc143.mt
+PHYSX_LIB_DIR=/path/to/PhysX/libs
+PHYSX_INCLUDE_DIR=/path/to/PhysX/include
+PHYSX4MC_BUILD_CONFIG=RelWithDebInfo
+```
+
+`PHYSX_CONFIG` selects the PhysX subdirectory under the platform binary
+directory. Valid values are `debug`, `checked`, `profile`, and `release`. When
+unset, the bridge maps normal release-like CMake builds, including
+`RelWithDebInfo`, to the PhysX `release` directory.
+
+`PHYSX4MC_BUILD_CONFIG` controls the bridge's own CMake build configuration.
+For the Windows helper script, it defaults to `RelWithDebInfo`, or to `Debug`
+when `PHYSX_CONFIG=debug`.
+
+On Windows, the bridge also matches its MSVC runtime to
+`PHYSX_WINDOWS_CRT_SUFFIX`:
+
+```text
+PHYSX_WINDOWS_CRT_SUFFIX=mt   -> /MT or /MTd
+PHYSX_WINDOWS_CRT_SUFFIX=md   -> /MD or /MDd
+```
+
+The default is `mt`, matching PhysX's public `vc17win64` presets. A linker error
+mentioning `_ITERATOR_DEBUG_LEVEL` or `RuntimeLibrary` usually means a Debug
+PhysX `.lib` was linked into a release bridge, or the PhysX CRT suffix does not
+match the bridge's `PHYSX_WINDOWS_CRT_SUFFIX`.
+
+For Windows bundled jars, `physx4mc_native.dll` is not always self-contained. If
+the bridge was linked against PhysX import libraries, the jar must also contain
+the dynamic PhysX DLL dependencies in the same resource directory:
+
+```text
+/native/windows-x86_64/physx4mc_native.dll
+/native/windows-x86_64/PhysXFoundation_64.dll
+/native/windows-x86_64/PhysXCommon_64.dll
+/native/windows-x86_64/PhysX_64.dll
+```
+
+The loader extracts and preloads these PhysX dependency DLLs before loading
+`physx4mc_native.dll`. A runtime error saying `Can't find dependent libraries`
+means one of these DLLs, or one of their own runtime dependencies, is missing.
+
+GPU dynamics additionally needs:
+
+```text
+/native/windows-x86_64/PhysXGpu_64.dll
+```
+
+The loader treats `PhysXGpu_64.dll` as optional so CPU-only startup does not
+fail on machines without a usable CUDA driver. If GPU dynamics is enabled but
+the DLL cannot be loaded by PhysX, `/px4mc physics_status` should show
+`gpuRequested=true` and `gpuScenes=0`.
+
+When available, linking against PhysX static libraries is preferred because it
+keeps the bundled mod jar to one platform bridge DLL. The CMake lookup checks
+static PhysX libraries before dynamic import libraries.
+
+Available helper scripts:
+
+```text
+tools/native/build-linux.sh
+tools/native/build-windows.ps1
+tools/native/build-macos.sh
+```
+
+These scripts only build the native bridge into `build/native/<platform>/`.
+They do not change the default Gradle jar packaging behavior.
 
 ## Loader Path
 
@@ -49,5 +139,7 @@ can use the bundled resource fallback when built with
 
 ## Current Scope
 
-Only Linux x86_64 is packaged. Windows and macOS should be added after the Linux
-simulation, collision, and entity sync path has stayed stable for a while.
+Only Linux x86_64 is packaged by Gradle. Windows and macOS native bridge builds
+now have CMake/script entry points, but copying `.dll` or `.dylib` files into
+the jar should be added as explicit packaging tasks after those platforms are
+validated locally.

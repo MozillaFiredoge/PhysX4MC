@@ -1,8 +1,12 @@
 package com.firedoge.px4mc.minecraft.scene;
 
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -10,7 +14,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
-import com.mojang.math.Transformation;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
 
 import com.firedoge.px4mc.api.PhysicsBackend;
 import com.firedoge.px4mc.api.PhysicsPose;
@@ -19,6 +24,7 @@ import com.firedoge.px4mc.api.PhysicsVector;
 import com.firedoge.px4mc.api.PhysicsWorldConfig;
 import com.firedoge.px4mc.config.PhysXConfig;
 import com.firedoge.px4mc.physics.PhysicsManager;
+import com.mojang.math.Transformation;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
@@ -38,17 +44,17 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.phys.shapes.VoxelShape;
 import net.minecraft.world.phys.Vec3;
-import org.joml.Quaternionf;
-import org.joml.Vector3f;
+import net.minecraft.world.phys.shapes.VoxelShape;
 
 public final class ServerPhysicsRuntime implements AutoCloseable {
     public static final ServerPhysicsRuntime INSTANCE = new ServerPhysicsRuntime();
     private static final int ACTIVE_OBJECT_TERRAIN_CHUNK_RADIUS = 1;
     private static final int SPAWN_TERRAIN_CHUNK_RADIUS = 1;
     private static final int MAX_TERRAIN_CHUNK_BUILDS_PER_TICK = 1;
+    private static final int MAX_STRESS_GRID_OBJECTS = 20_000;
     private static final BlockState DEBUG_PROXY_BLOCK = Blocks.LIME_STAINED_GLASS.defaultBlockState();
+    private static final MethodHandle DISPLAY_SET_TRANSFORMATION = findDisplaySetTransformation();
 
     private final PhysicsSceneManager scenes = new PhysicsSceneManager();
     private final Map<String, SceneState> states = new LinkedHashMap<>();
@@ -57,6 +63,7 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
     private final Map<String, Map<Long, Set<Long>>> terrainChunks = new LinkedHashMap<>();
     private final Map<String, LinkedHashSet<Long>> terrainBuildQueues = new LinkedHashMap<>();
     private final Map<String, Map<Long, TerrainChunkBuildState>> terrainChunkBuildStates = new LinkedHashMap<>();
+    private final Map<String, Integer> activeTerrainScanCursors = new LinkedHashMap<>();
     private long terrainColliderSequence = 1L;
     private int lastTerrainChunkBuildCount;
     private int lastTerrainColliderBuildCount;
@@ -64,7 +71,25 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
     private long lastTerrainBuildNanos;
     private int debugProxyRecreateCount;
     private int lastDebugProxyRecreateCount;
-    private boolean warnedUnavailable;
+    private long lastRuntimeTickNanos;
+    private long lastQueueActiveNanos;
+    private long lastTerrainProcessNanos;
+    private long lastStepPhaseNanos;
+    private long lastSyncEntitiesNanos;
+    private long lastSyncObjectLookupNanos;
+    private long lastSyncEntityLookupNanos;
+    private long lastSyncRecreateNanos;
+    private long lastSyncPoseReadNanos;
+    private long lastSyncApplyNanos;
+    private int lastActiveSnapshotCount;
+    private int lastActiveDynamicCount;
+    private int lastActiveTerrainQueuedCount;
+    private int lastActiveTerrainSkippedHeightCount;
+    private int lastSyncedEntityCount;
+    private int lastEntityPoseSyncCount;
+    private int lastSyncRemovedBindingCount;
+    private int lastSyncMissingEntityCount;
+    private int debugProxySyncCursor;
 
     private ServerPhysicsRuntime() {
     }
@@ -82,7 +107,8 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
         PhysicsWorldConfig config = new PhysicsWorldConfig(
                 com.firedoge.px4mc.api.PhysicsVector.MC_GRAVITY,
                 PhysXConfig.FIXED_TIME_STEP.get().floatValue(),
-                PhysXConfig.MAX_SUB_STEPS.get()
+                PhysXConfig.MAX_SUB_STEPS.get(),
+                PhysXConfig.ENABLE_GPU_DYNAMICS.getAsBoolean()
         );
         ServerPhysicsScene scene = scenes.createScene(sceneKey, backend, config);
         states.put(sceneKey, new SceneState(scene, config.fixedTimeStep(), config.maxSubSteps()));
@@ -91,23 +117,57 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
 
     public synchronized void tick(MinecraftServer server) {
         Objects.requireNonNull(server, "server");
-        if (!ensureScenes(server)) {
+        if (states.isEmpty()) {
+            clearLastTickProfiling();
             return;
         }
-        queueTerrainAroundActiveObjects(server);
+
+        long tickStart = System.nanoTime();
+        long queueStart = tickStart;
+        ActiveObjectTerrainQueueResult activeQueueResult = queueTerrainAroundActiveObjects(server);
+        lastQueueActiveNanos = System.nanoTime() - queueStart;
+        lastActiveSnapshotCount = activeQueueResult.snapshotCount();
+        lastActiveDynamicCount = activeQueueResult.dynamicCount();
+        lastActiveTerrainQueuedCount = activeQueueResult.queuedTerrainChunks();
+        lastActiveTerrainSkippedHeightCount = activeQueueResult.skippedByHeight();
+
+        long terrainStart = System.nanoTime();
         processTerrainBuildQueue(server);
+        lastTerrainProcessNanos = System.nanoTime() - terrainStart;
+
+        long stepStart = System.nanoTime();
         for (SceneState state : List.copyOf(states.values())) {
             state.advance(1.0F / 20.0F);
         }
-        syncBoundEntities(server);
+        lastStepPhaseNanos = System.nanoTime() - stepStart;
+
+        long syncStart = System.nanoTime();
+        EntitySyncResult entitySyncResult = syncBoundEntities(server);
+        lastSyncEntitiesNanos = System.nanoTime() - syncStart;
+        lastSyncedEntityCount = entitySyncResult.processedBindings();
+        lastEntityPoseSyncCount = entitySyncResult.poseSyncs();
+        lastSyncObjectLookupNanos = entitySyncResult.objectLookupNanos();
+        lastSyncEntityLookupNanos = entitySyncResult.entityLookupNanos();
+        lastSyncRecreateNanos = entitySyncResult.recreateNanos();
+        lastSyncPoseReadNanos = entitySyncResult.poseReadNanos();
+        lastSyncApplyNanos = entitySyncResult.applyNanos();
+        lastSyncRemovedBindingCount = entitySyncResult.removedBindings();
+        lastSyncMissingEntityCount = entitySyncResult.missingEntities();
+        lastRuntimeTickNanos = System.nanoTime() - tickStart;
     }
 
     public synchronized RuntimeStatus status() {
         int objectCount = 0;
         int dynamicBoxCount = 0;
+        int gpuDynamicsSceneCount = 0;
+        LinkedHashSet<String> gpuDynamicsStatuses = new LinkedHashSet<>();
         long lastStepNanos = 0L;
         for (SceneState state : states.values()) {
             objectCount += state.scene().objectCount();
+            if (state.scene().gpuDynamicsEnabled()) {
+                gpuDynamicsSceneCount++;
+            }
+            gpuDynamicsStatuses.add(state.scene().gpuDynamicsStatus());
             for (PhysicsObjectSnapshot snapshot : state.scene().snapshots()) {
                 if (snapshot.type() == PhysicsObjectType.DYNAMIC_BOX && !snapshot.closed()) {
                     dynamicBoxCount++;
@@ -129,13 +189,37 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
                 terrainChunkStateCount(TerrainChunkBuildStatus.DIRTY),
                 entityBindings.size(),
                 nativeLinked,
+                PhysXConfig.ENABLE_GPU_DYNAMICS.getAsBoolean(),
+                gpuDynamicsSceneCount,
+                describeGpuDynamicsStatuses(gpuDynamicsStatuses),
                 lastStepNanos,
                 lastTerrainChunkBuildCount,
                 lastTerrainColliderBuildCount,
                 lastTerrainPartialColliderBuildCount,
                 lastTerrainBuildNanos,
                 debugProxyRecreateCount,
-                lastDebugProxyRecreateCount
+                lastDebugProxyRecreateCount,
+                lastRuntimeTickNanos,
+                lastQueueActiveNanos,
+                lastTerrainProcessNanos,
+                lastStepPhaseNanos,
+                lastSyncEntitiesNanos,
+                lastSyncObjectLookupNanos,
+                lastSyncEntityLookupNanos,
+                lastSyncRecreateNanos,
+                lastSyncPoseReadNanos,
+                lastSyncApplyNanos,
+                lastActiveSnapshotCount,
+                lastActiveDynamicCount,
+                lastActiveTerrainQueuedCount,
+                lastActiveTerrainSkippedHeightCount,
+                lastSyncedEntityCount,
+                lastEntityPoseSyncCount,
+                lastSyncRemovedBindingCount,
+                lastSyncMissingEntityCount,
+                debugProxySyncTransform(),
+                debugProxySyncLimit(),
+                activeTerrainScanLimit()
         );
     }
 
@@ -154,6 +238,7 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
         terrainChunks.clear();
         terrainBuildQueues.clear();
         terrainChunkBuildStates.clear();
+        activeTerrainScanCursors.clear();
         terrainColliderSequence = 1L;
         lastTerrainChunkBuildCount = 0;
         lastTerrainColliderBuildCount = 0;
@@ -161,6 +246,8 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
         lastTerrainBuildNanos = 0L;
         debugProxyRecreateCount = 0;
         lastDebugProxyRecreateCount = 0;
+        debugProxySyncCursor = 0;
+        clearLastTickProfiling();
         for (SceneState state : states.values()) {
             removed += state.scene().objectCount();
             state.scene().clearObjects();
@@ -175,12 +262,15 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
         terrainChunks.remove(sceneKey);
         terrainBuildQueues.remove(sceneKey);
         terrainChunkBuildStates.remove(sceneKey);
+        activeTerrainScanCursors.remove(sceneKey);
         lastTerrainChunkBuildCount = 0;
         lastTerrainColliderBuildCount = 0;
         lastTerrainPartialColliderBuildCount = 0;
         lastTerrainBuildNanos = 0L;
         debugProxyRecreateCount = 0;
         lastDebugProxyRecreateCount = 0;
+        debugProxySyncCursor = 0;
+        clearLastTickProfiling();
         SceneState state = states.get(sceneKey);
         if (state == null) {
             return 0;
@@ -236,6 +326,76 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
         return new SpawnedDebugBox(box, entity.getUUID(), queuedTerrainChunks, halfExtents, mass);
     }
 
+    public synchronized StressGridResult spawnStressGrid(
+            ServerLevel level,
+            Vec3 position,
+            int countX,
+            int countY,
+            int countZ,
+            float spacing,
+            float size,
+            float mass
+    ) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(position, "position");
+        if (countX <= 0 || countY <= 0 || countZ <= 0) {
+            throw new IllegalArgumentException("Stress grid dimensions must be positive");
+        }
+        int requested = Math.toIntExact((long) countX * countY * countZ);
+        if (requested > MAX_STRESS_GRID_OBJECTS) {
+            throw new IllegalArgumentException("Stress grid is limited to " + MAX_STRESS_GRID_OBJECTS + " objects");
+        }
+        if (spacing <= 0.0F) {
+            throw new IllegalArgumentException("Stress grid spacing must be positive");
+        }
+        if (size <= 0.0F) {
+            throw new IllegalArgumentException("Box size must be positive");
+        }
+        if (mass <= 0.0F) {
+            throw new IllegalArgumentException("Box mass must be positive");
+        }
+
+        ServerPhysicsScene scene = sceneFor(level);
+        int queuedTerrainChunks = queueTerrainAround(level, BlockPos.containing(position), SPAWN_TERRAIN_CHUNK_RADIUS);
+        float halfExtent = size * 0.5F;
+        PhysicsVector halfExtents = new PhysicsVector(halfExtent, halfExtent, halfExtent);
+        List<PhysicsObject> createdObjects = new ArrayList<>(requested);
+
+        double baseX = position.x() - (countX - 1) * spacing * 0.5D;
+        double baseY = position.y() + halfExtent + 1.5D;
+        double baseZ = position.z() - (countZ - 1) * spacing * 0.5D;
+        try {
+            for (int y = 0; y < countY; y++) {
+                for (int z = 0; z < countZ; z++) {
+                    for (int x = 0; x < countX; x++) {
+                        PhysicsObject box = scene.createDynamicBox(
+                                halfExtent,
+                                halfExtent,
+                                halfExtent,
+                                new PhysicsPose(
+                                        new PhysicsVector(
+                                                baseX + x * spacing,
+                                                baseY + y * spacing,
+                                                baseZ + z * spacing
+                                        ),
+                                        PhysicsQuaternion.IDENTITY
+                                ),
+                                mass
+                        );
+                        createdObjects.add(box);
+                    }
+                }
+            }
+        } catch (RuntimeException exception) {
+            for (PhysicsObject object : createdObjects) {
+                object.close();
+            }
+            throw exception;
+        }
+
+        return new StressGridResult(createdObjects.size(), requested, queuedTerrainChunks, halfExtents, spacing, mass);
+    }
+
     public synchronized Optional<VelocityControlResult> setNearestDynamicBoxVelocity(ServerLevel level, Vec3 origin, PhysicsVector velocity, double maxDistance) {
         Objects.requireNonNull(level, "level");
         Objects.requireNonNull(origin, "origin");
@@ -280,6 +440,35 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
         ));
     }
 
+    public synchronized Optional<RemovedDebugBox> removeDynamicBox(ServerLevel level, PhysicsObjectId objectId) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(objectId, "objectId");
+
+        SceneState state = states.get(sceneKey(level));
+        if (state == null || state.scene().isClosed()) {
+            return Optional.empty();
+        }
+
+        Optional<PhysicsObject> maybeObject = state.scene().object(objectId);
+        if (maybeObject.isEmpty() || maybeObject.get().type() != PhysicsObjectType.DYNAMIC_BOX) {
+            return Optional.empty();
+        }
+
+        PhysicsObject object = maybeObject.get();
+        PhysicsObjectSnapshot snapshot = object.snapshot();
+        UUID entityId = discardBoundEntity(level, objectId);
+        if (!state.scene().removeObject(objectId)) {
+            return Optional.empty();
+        }
+
+        return Optional.of(new RemovedDebugBox(
+                snapshot.id(),
+                entityId,
+                snapshot.pose().position(),
+                snapshot.linearVelocity()
+        ));
+    }
+
     @Override
     public synchronized void close() {
         entityBindings.clear();
@@ -287,6 +476,7 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
         terrainChunks.clear();
         terrainBuildQueues.clear();
         terrainChunkBuildStates.clear();
+        activeTerrainScanCursors.clear();
         terrainColliderSequence = 1L;
         lastTerrainChunkBuildCount = 0;
         lastTerrainColliderBuildCount = 0;
@@ -294,9 +484,10 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
         lastTerrainBuildNanos = 0L;
         debugProxyRecreateCount = 0;
         lastDebugProxyRecreateCount = 0;
+        debugProxySyncCursor = 0;
+        clearLastTickProfiling();
         scenes.close();
         states.clear();
-        warnedUnavailable = false;
     }
 
     public synchronized void close(MinecraftServer server) {
@@ -304,24 +495,46 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
         close();
     }
 
-    private boolean ensureScenes(MinecraftServer server) {
-        try {
-            for (ServerLevel level : server.getAllLevels()) {
-                sceneFor(level);
-            }
-            return true;
-        } catch (RuntimeException exception) {
-            if (!warnedUnavailable) {
-                com.firedoge.px4mc.PhysX4mc.LOGGER.warn("Physics runtime is not available; server scenes were not created", exception);
-                warnedUnavailable = true;
-            }
-            return false;
-        }
-    }
-
     private static String sceneKey(ServerLevel level) {
         ResourceKey<Level> dimension = level.dimension();
         return dimension.location().toString();
+    }
+
+    private static int debugProxySyncLimit() {
+        return PhysXConfig.DEBUG_PROXY_MAX_SYNCS_PER_TICK.get();
+    }
+
+    private static boolean debugProxySyncTransform() {
+        return PhysXConfig.DEBUG_PROXY_SYNC_TRANSFORM.getAsBoolean();
+    }
+
+    private static int activeTerrainScanLimit() {
+        return PhysXConfig.ACTIVE_TERRAIN_MAX_SCANS_PER_TICK.get();
+    }
+
+    private static int activeTerrainVerticalMargin() {
+        return PhysXConfig.ACTIVE_TERRAIN_VERTICAL_MARGIN.get();
+    }
+
+    private void clearLastTickProfiling() {
+        lastRuntimeTickNanos = 0L;
+        lastQueueActiveNanos = 0L;
+        lastTerrainProcessNanos = 0L;
+        lastStepPhaseNanos = 0L;
+        lastSyncEntitiesNanos = 0L;
+        lastSyncObjectLookupNanos = 0L;
+        lastSyncEntityLookupNanos = 0L;
+        lastSyncRecreateNanos = 0L;
+        lastSyncPoseReadNanos = 0L;
+        lastSyncApplyNanos = 0L;
+        lastActiveSnapshotCount = 0;
+        lastActiveDynamicCount = 0;
+        lastActiveTerrainQueuedCount = 0;
+        lastActiveTerrainSkippedHeightCount = 0;
+        lastSyncedEntityCount = 0;
+        lastEntityPoseSyncCount = 0;
+        lastSyncRemovedBindingCount = 0;
+        lastSyncMissingEntityCount = 0;
     }
 
     private int terrainColliderCount() {
@@ -330,6 +543,13 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
             count += colliders.size();
         }
         return count;
+    }
+
+    private static String describeGpuDynamicsStatuses(Set<String> statuses) {
+        if (statuses.isEmpty()) {
+            return "no_scenes";
+        }
+        return String.join("|", statuses);
     }
 
     private int terrainQueuedChunkCount() {
@@ -360,25 +580,59 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
         return count;
     }
 
-    private void queueTerrainAroundActiveObjects(MinecraftServer server) {
+    private ActiveObjectTerrainQueueResult queueTerrainAroundActiveObjects(MinecraftServer server) {
+        int snapshotCount = 0;
+        int dynamicCount = 0;
+        int skippedByHeight = 0;
+        int queuedTerrainChunks = 0;
+        int remainingScans = activeTerrainScanLimit();
         for (ServerLevel level : server.getAllLevels()) {
             SceneState state = states.get(sceneKey(level));
             if (state == null || state.scene().isClosed()) {
                 continue;
             }
-            for (PhysicsObjectSnapshot snapshot : state.scene().snapshots()) {
-                if (snapshot.type() == PhysicsObjectType.DYNAMIC_BOX && !snapshot.closed()) {
-                    PhysicsVector position = snapshot.pose().position();
-                    queueTerrainAround(level, BlockPos.containing(position.x(), position.y(), position.z()), ACTIVE_OBJECT_TERRAIN_CHUNK_RADIUS);
+            String sceneKey = state.scene().sceneKey();
+            List<PhysicsObject> objects = state.scene().objectsOfType(PhysicsObjectType.DYNAMIC_BOX);
+            snapshotCount += objects.size();
+            if (objects.isEmpty()) {
+                activeTerrainScanCursors.remove(sceneKey);
+                continue;
+            }
+            if (remainingScans <= 0) {
+                continue;
+            }
+
+            int cursor = activeTerrainScanCursors.getOrDefault(sceneKey, 0);
+            if (cursor >= objects.size()) {
+                cursor = 0;
+            }
+            int scanCount = Math.min(remainingScans, objects.size());
+            for (int i = 0; i < scanCount; i++) {
+                PhysicsObject object = objects.get((cursor + i) % objects.size());
+                if (object.isClosed()) {
+                    continue;
                 }
+                PhysicsVector position = object.pose().position();
+                dynamicCount++;
+                if (!isWithinActiveTerrainHeight(level, position)) {
+                    skippedByHeight++;
+                    continue;
+                }
+                queuedTerrainChunks += queueTerrainAround(level, BlockPos.containing(position.x(), position.y(), position.z()), ACTIVE_OBJECT_TERRAIN_CHUNK_RADIUS);
+            }
+            activeTerrainScanCursors.put(sceneKey, (cursor + scanCount) % objects.size());
+            remainingScans -= scanCount;
+            if (remainingScans <= 0) {
+                break;
             }
         }
+        return new ActiveObjectTerrainQueueResult(snapshotCount, dynamicCount, skippedByHeight, queuedTerrainChunks);
     }
 
     private int queueTerrainAround(ServerLevel level, BlockPos center, int chunkRadius) {
         int centerChunkX = Math.floorDiv(center.getX(), 16);
         int centerChunkZ = Math.floorDiv(center.getZ(), 16);
-        int queued = queueTerrainChunk(level, ChunkPos.asLong(centerChunkX, centerChunkZ), false);
+        int queued = queueLoadedTerrainChunk(level, ChunkPos.asLong(centerChunkX, centerChunkZ), false);
 
         for (int radius = 1; radius <= chunkRadius; radius++) {
             for (int dx = -radius; dx <= radius; dx++) {
@@ -386,11 +640,24 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
                     if (Math.abs(dx) != radius && Math.abs(dz) != radius) {
                         continue;
                     }
-                    queued += queueTerrainChunk(level, ChunkPos.asLong(centerChunkX + dx, centerChunkZ + dz), false);
+                    queued += queueLoadedTerrainChunk(level, ChunkPos.asLong(centerChunkX + dx, centerChunkZ + dz), false);
                 }
             }
         }
         return queued;
+    }
+
+    private int queueLoadedTerrainChunk(ServerLevel level, long chunkKey, boolean dirty) {
+        if (!isChunkSafeToInspect(level, chunkKey)) {
+            return 0;
+        }
+        return queueTerrainChunk(level, chunkKey, dirty);
+    }
+
+    private static boolean isWithinActiveTerrainHeight(ServerLevel level, PhysicsVector position) {
+        int margin = activeTerrainVerticalMargin();
+        return position.y() >= level.getMinBuildHeight() - margin
+                && position.y() <= level.getMaxBuildHeight() + margin;
     }
 
     private int queueTerrainChunk(ServerLevel level, long chunkKey, boolean dirty) {
@@ -763,23 +1030,56 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
         return (int) (chunkKey >> 32);
     }
 
-    private void syncBoundEntities(MinecraftServer server) {
+    private EntitySyncResult syncBoundEntities(MinecraftServer server) {
         int recreated = 0;
-        for (EntityBinding binding : List.copyOf(entityBindings.values())) {
+        int processedBindings = 0;
+        int poseSyncs = 0;
+        int removedBindings = 0;
+        int missingEntities = 0;
+        long objectLookupNanos = 0L;
+        long entityLookupNanos = 0L;
+        long recreateNanos = 0L;
+        long poseReadNanos = 0L;
+        long applyNanos = 0L;
+        List<EntityBinding> bindings = List.copyOf(entityBindings.values());
+        if (bindings.isEmpty()) {
+            debugProxySyncCursor = 0;
+            lastDebugProxyRecreateCount = 0;
+            return EntitySyncResult.EMPTY;
+        }
+
+        if (debugProxySyncCursor >= bindings.size()) {
+            debugProxySyncCursor = 0;
+        }
+        int syncLimit = debugProxySyncLimit();
+        if (syncLimit <= 0) {
+            lastDebugProxyRecreateCount = 0;
+            return EntitySyncResult.EMPTY;
+        }
+        int syncCount = Math.min(syncLimit, bindings.size());
+        for (int i = 0; i < syncCount; i++) {
+            EntityBinding binding = bindings.get((debugProxySyncCursor + i) % bindings.size());
+            processedBindings++;
             SceneState state = states.get(binding.sceneKey());
             ServerLevel level = server.getLevel(binding.levelKey());
             if (state == null || level == null) {
                 entityBindings.remove(binding.objectId());
+                removedBindings++;
                 continue;
             }
 
+            long objectLookupStart = System.nanoTime();
             Optional<PhysicsObject> maybeObject = state.scene().object(binding.objectId());
+            objectLookupNanos += System.nanoTime() - objectLookupStart;
+            long entityLookupStart = System.nanoTime();
             Entity entity = level.getEntity(binding.entityId());
+            entityLookupNanos += System.nanoTime() - entityLookupStart;
             if (maybeObject.isEmpty()) {
                 if (entity != null && !entity.isRemoved()) {
                     entity.discard();
                 }
                 entityBindings.remove(binding.objectId());
+                removedBindings++;
                 continue;
             }
             if (entity != null && !(entity instanceof Display.BlockDisplay)) {
@@ -787,20 +1087,49 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
                 entity = null;
             }
             if (entity == null || entity.isRemoved()) {
+                missingEntities++;
                 PhysicsObject object = maybeObject.get();
+                long recreateStart = System.nanoTime();
                 Display.BlockDisplay replacement = createDebugEntity(level, object, binding.halfExtents());
                 if (!level.addFreshEntity(replacement)) {
+                    recreateNanos += System.nanoTime() - recreateStart;
                     continue;
                 }
+                recreateNanos += System.nanoTime() - recreateStart;
                 entityBindings.put(object.id(), new EntityBinding(binding.sceneKey(), binding.levelKey(), object.id(), replacement.getUUID(), binding.halfExtents()));
                 entity = replacement;
                 recreated++;
             }
 
-            syncDebugEntity((Display.BlockDisplay) entity, maybeObject.get().pose(), binding.halfExtents());
+            long poseReadStart = System.nanoTime();
+            PhysicsPose pose = maybeObject.get().pose();
+            poseReadNanos += System.nanoTime() - poseReadStart;
+            long applyStart = System.nanoTime();
+            boolean poseApplied = syncDebugEntity((Display.BlockDisplay) entity, pose, binding.halfExtents());
+            applyNanos += System.nanoTime() - applyStart;
+            if (poseApplied) {
+                poseSyncs++;
+            }
+        }
+        if (entityBindings.isEmpty()) {
+            debugProxySyncCursor = 0;
+        } else {
+            debugProxySyncCursor = (debugProxySyncCursor + syncCount) % entityBindings.size();
         }
         lastDebugProxyRecreateCount = recreated;
         debugProxyRecreateCount += recreated;
+        return new EntitySyncResult(
+                processedBindings,
+                poseSyncs,
+                recreated,
+                removedBindings,
+                missingEntities,
+                objectLookupNanos,
+                entityLookupNanos,
+                recreateNanos,
+                poseReadNanos,
+                applyNanos
+        );
     }
 
     private Display.BlockDisplay createDebugEntity(ServerLevel level, PhysicsObject object, PhysicsVector halfExtents) {
@@ -809,19 +1138,31 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
         entity.setInvulnerable(true);
         entity.setCustomName(Component.literal("PhysX " + object.id().toString().substring(0, 8)));
         entity.setCustomNameVisible(false);
-        syncDebugEntity(entity, object.pose(), halfExtents);
+        applyInitialDebugDisplayState(entity, object.pose(), halfExtents);
         return entity;
     }
 
-    private void syncDebugEntity(Display.BlockDisplay entity, PhysicsPose pose, PhysicsVector halfExtents) {
+    private boolean syncDebugEntity(Display.BlockDisplay entity, PhysicsPose pose, PhysicsVector halfExtents) {
         PhysicsVector position = pose.position();
-        entity.setNoGravity(true);
-        entity.setDeltaMovement(Vec3.ZERO);
-        applyDebugDisplayState(entity, pose, halfExtents);
-        entity.teleportTo(position.x(), position.y(), position.z());
+        boolean syncTransform = debugProxySyncTransform();
+        if (!syncTransform && isAtPosition(entity, position)) {
+            return false;
+        }
+        entity.setPos(position.x(), position.y(), position.z());
+        if (syncTransform) {
+            setDebugDisplayTransformation(entity, debugDisplayTransformation(pose, halfExtents));
+        }
+        return true;
     }
 
-    private void applyDebugDisplayState(Display.BlockDisplay entity, PhysicsPose pose, PhysicsVector halfExtents) {
+    private static boolean isAtPosition(Entity entity, PhysicsVector position) {
+        double dx = entity.getX() - position.x();
+        double dy = entity.getY() - position.y();
+        double dz = entity.getZ() - position.z();
+        return dx * dx + dy * dy + dz * dz <= 1.0E-6D;
+    }
+
+    private void applyInitialDebugDisplayState(Display.BlockDisplay entity, PhysicsPose pose, PhysicsVector halfExtents) {
         CompoundTag tag = new CompoundTag();
         PhysicsVector position = pose.position();
         tag.put("Pos", doubleList(position.x(), position.y(), position.z()));
@@ -841,7 +1182,25 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
         entity.load(tag);
     }
 
+    private static void setDebugDisplayTransformation(Display.BlockDisplay entity, Transformation transformation) {
+        if (DISPLAY_SET_TRANSFORMATION == null) {
+            return;
+        }
+        try {
+            DISPLAY_SET_TRANSFORMATION.invoke(entity, transformation);
+        } catch (Throwable ignored) {
+            // If private display setters are unavailable, position sync still keeps the proxy useful.
+        }
+    }
+
     private Optional<net.minecraft.nbt.Tag> encodeDisplayTransformation(PhysicsPose pose, PhysicsVector halfExtents) {
+        Transformation transformation = debugDisplayTransformation(pose, halfExtents);
+        return Transformation.EXTENDED_CODEC
+                .encodeStart(NbtOps.INSTANCE, transformation)
+                .resultOrPartial(message -> com.firedoge.px4mc.PhysX4mc.LOGGER.warn("Failed to encode debug display transformation: {}", message));
+    }
+
+    private static Transformation debugDisplayTransformation(PhysicsPose pose, PhysicsVector halfExtents) {
         Quaternionf rotation = toJomlQuaternion(pose.rotation());
         Vector3f scale = new Vector3f(
                 (float) (halfExtents.x() * 2.0D),
@@ -854,15 +1213,22 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
                 (float) halfExtents.z()
         ).rotate(new Quaternionf(rotation));
         Vector3f translation = localCenter.negate();
-        Transformation transformation = new Transformation(
+        return new Transformation(
                 translation,
                 rotation,
                 scale,
                 new Quaternionf()
         );
-        return Transformation.EXTENDED_CODEC
-                .encodeStart(NbtOps.INSTANCE, transformation)
-                .resultOrPartial(message -> com.firedoge.px4mc.PhysX4mc.LOGGER.warn("Failed to encode debug display transformation: {}", message));
+    }
+
+    private static MethodHandle findDisplaySetTransformation() {
+        try {
+            MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(Display.class, MethodHandles.lookup());
+            return lookup.findVirtual(Display.class, "setTransformation", MethodType.methodType(void.class, Transformation.class));
+        } catch (ReflectiveOperationException exception) {
+            com.firedoge.px4mc.PhysX4mc.LOGGER.warn("Display#setTransformation is unavailable; debug proxies will only sync position", exception);
+            return null;
+        }
     }
 
     private static Quaternionf toJomlQuaternion(PhysicsQuaternion rotation) {
@@ -902,6 +1268,18 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
         }
     }
 
+    private UUID discardBoundEntity(ServerLevel level, PhysicsObjectId objectId) {
+        EntityBinding binding = entityBindings.remove(objectId);
+        if (binding == null) {
+            return null;
+        }
+        Entity entity = level.getEntity(binding.entityId());
+        if (entity != null && !entity.isRemoved()) {
+            entity.discard();
+        }
+        return binding.entityId();
+    }
+
     private void discardBoundEntities(MinecraftServer server) {
         for (EntityBinding binding : List.copyOf(entityBindings.values())) {
             ServerLevel level = server.getLevel(binding.levelKey());
@@ -926,13 +1304,37 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
             int terrainDirtyChunkCount,
             int boundEntityCount,
             boolean nativeLinked,
+            boolean gpuDynamicsRequested,
+            int gpuDynamicsSceneCount,
+            String gpuDynamicsStatus,
             long lastStepNanos,
             int lastTerrainChunkBuildCount,
             int lastTerrainColliderBuildCount,
             int lastTerrainPartialColliderBuildCount,
             long lastTerrainBuildNanos,
             int debugProxyRecreateCount,
-            int lastDebugProxyRecreateCount
+            int lastDebugProxyRecreateCount,
+            long lastRuntimeTickNanos,
+            long lastQueueActiveNanos,
+            long lastTerrainProcessNanos,
+            long lastStepPhaseNanos,
+            long lastSyncEntitiesNanos,
+            long lastSyncObjectLookupNanos,
+            long lastSyncEntityLookupNanos,
+            long lastSyncRecreateNanos,
+            long lastSyncPoseReadNanos,
+            long lastSyncApplyNanos,
+            int lastActiveSnapshotCount,
+            int lastActiveDynamicCount,
+            int lastActiveTerrainQueuedCount,
+            int lastActiveTerrainSkippedHeightCount,
+            int lastSyncedEntityCount,
+            int lastEntityPoseSyncCount,
+            int lastSyncRemovedBindingCount,
+            int lastSyncMissingEntityCount,
+            boolean debugProxySyncTransform,
+            int maxEntityPoseSyncsPerTick,
+            int activeTerrainMaxScansPerTick
     ) {
         public double lastStepMillis() {
             return lastStepNanos / 1_000_000.0D;
@@ -941,12 +1343,58 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
         public double lastTerrainBuildMillis() {
             return lastTerrainBuildNanos / 1_000_000.0D;
         }
+
+        public double lastRuntimeTickMillis() {
+            return lastRuntimeTickNanos / 1_000_000.0D;
+        }
+
+        public double lastQueueActiveMillis() {
+            return lastQueueActiveNanos / 1_000_000.0D;
+        }
+
+        public double lastTerrainProcessMillis() {
+            return lastTerrainProcessNanos / 1_000_000.0D;
+        }
+
+        public double lastStepPhaseMillis() {
+            return lastStepPhaseNanos / 1_000_000.0D;
+        }
+
+        public double lastSyncEntitiesMillis() {
+            return lastSyncEntitiesNanos / 1_000_000.0D;
+        }
+
+        public double lastSyncObjectLookupMillis() {
+            return lastSyncObjectLookupNanos / 1_000_000.0D;
+        }
+
+        public double lastSyncEntityLookupMillis() {
+            return lastSyncEntityLookupNanos / 1_000_000.0D;
+        }
+
+        public double lastSyncRecreateMillis() {
+            return lastSyncRecreateNanos / 1_000_000.0D;
+        }
+
+        public double lastSyncPoseReadMillis() {
+            return lastSyncPoseReadNanos / 1_000_000.0D;
+        }
+
+        public double lastSyncApplyMillis() {
+            return lastSyncApplyNanos / 1_000_000.0D;
+        }
     }
 
     public record SpawnedDebugBox(PhysicsObject object, UUID entityId, int terrainChunkQueueCount, PhysicsVector halfExtents, float mass) {
     }
 
+    public record StressGridResult(int created, int requested, int terrainChunkQueueCount, PhysicsVector halfExtents, float spacing, float mass) {
+    }
+
     public record VelocityControlResult(PhysicsObjectId objectId, PhysicsVector previousVelocity, PhysicsVector newVelocity, double distance) {
+    }
+
+    public record RemovedDebugBox(PhysicsObjectId objectId, UUID entityId, PhysicsVector lastPosition, PhysicsVector lastVelocity) {
     }
 
     private record EntityBinding(String sceneKey, ResourceKey<Level> levelKey, PhysicsObjectId objectId, UUID entityId, PhysicsVector halfExtents) {
@@ -956,6 +1404,24 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
     }
 
     private record TerrainChunkBuildResult(int created, int removed, int partialCreated, long buildNanos) {
+    }
+
+    private record ActiveObjectTerrainQueueResult(int snapshotCount, int dynamicCount, int skippedByHeight, int queuedTerrainChunks) {
+    }
+
+    private record EntitySyncResult(
+            int processedBindings,
+            int poseSyncs,
+            int recreated,
+            int removedBindings,
+            int missingEntities,
+            long objectLookupNanos,
+            long entityLookupNanos,
+            long recreateNanos,
+            long poseReadNanos,
+            long applyNanos
+    ) {
+        private static final EntitySyncResult EMPTY = new EntitySyncResult(0, 0, 0, 0, 0, 0L, 0L, 0L, 0L, 0L);
     }
 
     private enum TerrainChunkBuildStatus {

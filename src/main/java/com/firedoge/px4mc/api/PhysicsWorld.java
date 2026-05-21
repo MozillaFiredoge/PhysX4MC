@@ -13,6 +13,14 @@ public interface PhysicsWorld extends AutoCloseable {
 
     void step(float deltaSeconds);
 
+    default boolean gpuDynamicsEnabled() {
+        return false;
+    }
+
+    default String gpuDynamicsStatus() {
+        return "not_requested";
+    }
+
     boolean isClosed();
 
     @Override
