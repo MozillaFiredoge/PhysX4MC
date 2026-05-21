@@ -400,29 +400,262 @@ Status: passed for the current debug/stress scope. A representative run with
 solver step rather than Minecraft proxy synchronization. This does not imply
 that real gameplay should use thousands of visible Minecraft entities.
 
-## M18: Gameplay Physics Boundary Prototype
+## M18: Mechanics API And Coupling Boundary
 
-Goal: move from debug bodies and stress tests toward a gameplay-facing physics
-object model.
+Goal: move from debug bodies and stress tests toward a public mechanics
+substrate that aerodynamics, electromagnetics, vehicles, gameplay systems, and
+future RL tooling can build on.
 
-- Separate debug/stress bodies from gameplay physics objects in the scene layer.
-- Define which Minecraft state is authoritative for a gameplay object:
-  block state, entity state, or a physics-owned assembly.
-- Prototype one small physics block assembly: remove a few blocks from the
-  world, create one PhysX body or compound representation, drive a lightweight
-  render proxy, then settle or remove it cleanly.
-- Add lifecycle rules for objects that fall out of world bounds, go to sleep,
-  unload with chunks, or need to be converted back into blocks.
-- Keep the first prototype single-level and server-authored before revisiting a
-  full Sable-style sublevel grid.
+- Add a stable `PhysX4mc.api()` entry point.
+- Expose a per-`ServerLevel` `MechanicsWorld` instead of native handles or debug
+  scene internals.
+- Separate mechanics-owned gameplay bodies from debug/stress bodies.
+- Support the first rigid body surface: create dynamic boxes, list snapshots,
+  read one snapshot, set linear velocity, apply linear impulse, and remove a
+  body.
+- Keep `BlockDisplay` proxies out of the mechanics body model.
+- Add sandbox commands under `/px4mc mechanics` to exercise the public API.
+- Add optional show/hide debug proxy commands as a separate visualization
+  adapter.
+- Reserve force/torque APIs, contact events, compound bodies, soft bodies,
+  vehicle assemblies, and deterministic RL reset for later slices.
 
-Acceptance: a small gameplay object can be spawned from Minecraft state,
-simulated by PhysX, inspected through `/px4mc physics_status`, and cleaned up
-without leaving orphaned bodies, proxies, or terrain colliders.
+Acceptance: another server-side system can enter through `PhysX4mc.api()`,
+create a gameplay mechanics body in a level, apply an impulse, inspect its
+snapshot, and remove it without touching PhysX native handles or debug proxy
+state.
 
-Status: recommended next. This phase should answer what the mod actually wants
-from physics before investing in thousands of visible entity proxies or a full
-sublevel implementation.
+Status: M18.1 and M18.2 are implemented. The public API skeleton is available
+through `PhysX4mc.api()`, `/px4mc mechanics` exercises create/list/impulse/remove
+without using debug body commands, and show/hide debug proxies are optional
+adapters. Details are in `docs/mechanics-api.md`. The next slice should add a
+tiny gameplay object prototype on top of this API instead of binding gameplay
+directly to debug bodies.
+
+## M19: Default CCD Safety Baseline
+
+Goal: reduce high-speed tunneling before gameplay objects, vehicles, and future
+RL actions depend on the mechanics layer.
+
+- Enable `PxSceneFlag::eENABLE_CCD` for every PhysX scene.
+- Add `PxPairFlag::eDETECT_CCD_CONTACT` to normal contact pairs through the
+  native simulation filter shader.
+- Enable `PxRigidBodyFlag::eENABLE_CCD` on backend-created dynamic bodies.
+- Keep CCD on by default without adding a user-facing config or command.
+- Add a native smoke check for a fast dynamic box colliding with a thin static
+  wall in a single 20 TPS step.
+
+Acceptance: native smoke tests verify that a high-speed dynamic box does not
+tunnel through a thin static wall, and normal trigger behavior remains separate
+from CCD contact pairs.
+
+Status: implemented. Details are in `docs/ccd.md`.
+
+## M20: Detached Block Gameplay Prototype
+
+Goal: prove that Minecraft world content can detach into a mechanics-owned body
+without coupling gameplay directly to debug/stress bodies.
+
+- Add `/px4mc block detach <pos> [mass] [debugProxy]`.
+- Replace the selected block with air and refresh terrain collision around the
+  changed block.
+- Create a mechanics dynamic box from the block collision-shape bounding box.
+- Use the original block state as the optional `BlockDisplay` visualization.
+- Track detached block metadata separately from mechanics body ownership.
+- Add list, restore, and remove commands for the prototype lifecycle.
+
+Acceptance: a solid block can be detached into a mechanics body, collide with
+terrain as a dynamic object, receive mechanics impulses through the existing
+mechanics commands, and either be restored to its original position or removed.
+
+Status: prototype implemented. Details are in
+`docs/detached-block-prototype.md`.
+
+## M21: Small Block Assembly Prototype
+
+Goal: move from one detached block to a small Minecraft block structure while
+still avoiding full compound-body scope.
+
+- Add `/px4mc block detach_box <from> <to> [mass] [debugProxy]`.
+- Collect a bounded set of non-air blocks with collision shapes.
+- Remove those blocks from the world and refresh terrain collision around the
+  edited positions.
+- Represent the assembly with one aggregate mechanics dynamic box.
+- Save every original block state and relative position for restore.
+- Visualize the assembly with one `BlockDisplay` per original block, all
+  following the same mechanics body pose.
+
+Acceptance: a small block range can detach into one mechanics body, move as a
+single rigid assembly, list through `/px4mc block list`, and restore/remove
+through the same detached-block lifecycle as M20.
+
+Status: prototype implemented. Details are in
+`docs/detached-block-prototype.md`.
+
+## M22.1: SubLevel Ownership Model
+
+Goal: replace the temporary detached-block ownership model with a Sable-like
+sublevel boundary before adding richer assembly behavior.
+
+- Add `SubLevelId`, `PhysicsSubLevel`, `SubLevelBlock`, `SubLevelBounds`, and
+  `SubLevelSnapshot`.
+- Move block capture, mechanics body creation, visual proxy ownership, and
+  remove/discard lifecycle into `SubLevelManager`.
+- Treat the sublevel id as the gameplay handle while keeping the mechanics body
+  id as a physics implementation detail.
+- Add `/px4mc sublevel assemble_block <pos> [mass] [debugProxy]`.
+- Add `/px4mc sublevel assemble_box <from> <to> [mass] [debugProxy]`.
+- Add `/px4mc sublevel list [limit]`, `/px4mc sublevel remove <idPrefix>`,
+  and `/px4mc sublevel status`.
+- Keep `/px4mc block ...` commands as compatibility wrappers over the sublevel
+  manager.
+- Leave restore as a legacy/debug path instead of the primary lifecycle.
+
+Acceptance: a small block range can be captured into a named sublevel, moved by
+its mechanics body, listed and removed by sublevel id, while old block commands
+continue to work through the same manager.
+
+Status: implemented. Details are in `docs/sublevel.md`.
+
+## M23.1: SubLevel Interaction Contract
+
+Goal: make the next sublevel work compatible with a Sable-like chunk-section
+model and PhysX-owned player movement before adding more gameplay behavior.
+
+- Treat the player as a PhysX object when participating in this physics world.
+  PhysX owns the physical player pose; Minecraft synchronizes from PhysX after
+  the physics step.
+- Treat a sublevel as a chunk-section-like block store inside the host world.
+  The host world's server tick is the sublevel tick.
+- Define section-local block storage, local-to-world transforms, dirty shape
+  tracking, and bounded tick queues before adding deeper mixins.
+- Route player interaction through a world bridge that can transform raycasts,
+  use, break, and place operations between host-world and sublevel-local
+  coordinates.
+- Keep `BlockDisplay` entities as optional debug/render proxies only.
+- Delay block entities, normal entity capture, and full vanilla chunk injection
+  until the storage/query/tick contract is stable.
+
+Acceptance: the project has a written interaction contract that makes player
+physics ownership, sublevel tick ownership, cross-boundary interaction, and the
+next implementation slices explicit.
+
+Status: implemented. Details are in `docs/sublevel-interaction-contract.md`.
+
+## M23.2: Section-Local SubLevel Storage
+
+Goal: move sublevel internals from a captured block list to a chunk-section-like
+storage API before routing player interaction or rebuilding colliders from
+sublevel mutations.
+
+- Add a `SubLevelSectionStorage` with one 16x16x16 local section.
+- Store blocks by section-local coordinates while preserving source positions
+  for legacy/debug lifecycle paths.
+- Expose block lookup, block state lookup, collision bounds lookup, and source
+  coordinate conversion.
+- Mark local positions dirty on block mutation, removal, and explicit dirty
+  requests.
+- Support bounded dirty-position draining so future collider rebuild work can be
+  budgeted over host-world ticks.
+- Keep existing sublevel assemble/list/remove/impulse behavior compatible.
+
+Acceptance: an assembled sublevel owns section-local storage, existing commands
+still work, `/px4mc sublevel status` reports dirty block count, and dirty
+positions can be drained later by collider rebuild code.
+
+Status: implemented. Details are in `docs/sublevel.md`.
+
+## M23.3: PhysX-Owned Player Body Prototype
+
+Goal: create the first explicit player-to-PhysX binding so player pose can be
+owned by PhysX instead of Minecraft while the prototype is active.
+
+- Add a `PLAYER` mechanics body role.
+- Add `PlayerPhysicsManager` to bind one server player to one mechanics body.
+- Create a standing-player dynamic box with half extents `(0.30, 0.90, 0.30)`.
+- Step PhysX through the existing `ServerPhysicsRuntime` tick, then synchronize
+  the player feet position from the PhysX body center.
+- Disable vanilla gravity while the binding is active, clear vanilla delta
+  movement, and reset fall distance during sync.
+- Add `/px4mc player_physics enable [mass] [debugProxy]`.
+- Add `/px4mc player_physics disable`, `status`, and `impulse <x> <y> <z>`.
+- Clean up player bindings on `/px4mc clear`, dimension changes, missing bodies,
+  and server shutdown.
+
+Acceptance: a command-source player can be explicitly bound to a PhysX mechanics
+body, receive impulses through the player-physics command surface, and have
+their server position synchronized from the PhysX body after each physics step.
+
+Status: implemented. Details are in `docs/player-physics.md`.
+
+## M23.4: Vanilla Player Bridge
+
+Goal: keep normal Minecraft players vanilla-authoritative while exposing their
+position to PhysX through a player proxy body.
+
+- Add a `PLAYER_PROXY` mechanics body role.
+- Add `PlayerProxyManager` to bind one server player to one proxy mechanics
+  body.
+- Add `MechanicsWorld.setPose` so bridge code can update proxy bodies without
+  depending on debug object internals.
+- Sync player proxy pose and approximate player velocity before each
+  `ServerPhysicsRuntime` step.
+- Keep M23.3 `PLAYER` bodies and M23.4 `PLAYER_PROXY` bodies mutually exclusive
+  for the same player.
+- Add `/px4mc player_proxy enable [mass] [debugProxy]`.
+- Add `/px4mc player_proxy disable` and `status`.
+- Clean up player proxies on `/px4mc clear`, dimension changes, missing players,
+  and server shutdown.
+
+Acceptance: a command-source player can keep normal vanilla movement while a
+PhysX `PLAYER_PROXY` body follows them before each physics step, allowing other
+PhysX bodies to observe a player-shaped body without PhysX owning the player's
+final Minecraft pose.
+
+Status: implemented. Details are in `docs/player-bridge.md`.
+
+## M23.4.1: SubLevel Query Bridge
+
+Goal: let a vanilla player identify which block inside a moving sublevel they
+are looking at before implementing break/place/use routing.
+
+- Add `SubLevelTransform` for world-to-sublevel and sublevel-to-world coordinate
+  conversion from the mechanics body pose.
+- Add `SubLevelPickResult` as the read-only query result model.
+- Add `SubLevelManager.pickBlock` to raycast from a world-space origin/direction
+  into active sublevels in the current level.
+- Test captured block collision bounds in sublevel body-local space.
+- Add `/px4mc sublevel pick [maxDistance]`.
+- Report sublevel id, body id, section-local block position, source position,
+  block state, hit points, and distance.
+- Keep the phase read-only: no break/place/use, no storage mutation, and no
+  collider rebuild.
+
+Acceptance: after assembling and moving a sublevel, a player can look at its
+visible block proxy and run `/px4mc sublevel pick` to get the matching sublevel
+id and section-local block position.
+
+Status: implemented. Details are in `docs/sublevel-query-bridge.md`.
+
+## M23.4.2: Command-Gated SubLevel Break
+
+Goal: prove that an explicit player action can mutate sublevel-local storage
+through the query bridge before adding vanilla input hooks or placement.
+
+- Add `SubLevelBreakResult` as the mutation result model.
+- Add `SubLevelManager.breakPickedBlock` to reuse the player view ray query,
+  remove the selected local block from section storage, and mark it dirty.
+- Discard the matching `BlockDisplay` visual for the removed block.
+- Remove the whole sublevel mechanics body if the final block is broken.
+- Add `/px4mc sublevel break [maxDistance]`.
+- Keep the phase command-gated: no vanilla left-click/right-click mixins, no
+  placement, no use routing, and no collider rebuild yet.
+
+Acceptance: after assembling a visual sublevel, a player can look at one of its
+blocks and run `/px4mc sublevel break` to remove that block from sublevel
+storage and debug visuals while dirty state records the changed local position.
+
+Status: implemented. Details are in `docs/sublevel-interactions.md`.
 
 ## First Target
 

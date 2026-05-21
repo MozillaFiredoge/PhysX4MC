@@ -47,6 +47,7 @@ public:
     static bool get_body_pose(std::uint64_t body, double* output);
     static void set_body_pose(std::uint64_t body, double position_x, double position_y, double position_z, double rotation_x, double rotation_y, double rotation_z, double rotation_w);
     static void set_linear_velocity(std::uint64_t body, double velocity_x, double velocity_y, double velocity_z);
+    static bool get_linear_velocity(std::uint64_t body, double* output);
     static void destroy_body(std::uint64_t body);
     static void destroy_shape(std::uint64_t shape);
 

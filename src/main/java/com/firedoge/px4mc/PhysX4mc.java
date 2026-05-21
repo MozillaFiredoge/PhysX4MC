@@ -8,6 +8,8 @@ import com.firedoge.px4mc.api.PhysicsBackend;
 import com.firedoge.px4mc.backend.physx.PhysXBackend;
 import com.firedoge.px4mc.backend.physx.PhysXNative;
 import com.firedoge.px4mc.config.PhysXConfig;
+import com.firedoge.px4mc.mechanics.MechanicsApi;
+import com.firedoge.px4mc.mechanics.ServerMechanicsApi;
 import com.firedoge.px4mc.nativebridge.NativeException;
 import com.firedoge.px4mc.physics.PhysicsManager;
 import com.firedoge.px4mc.platform.neoforge.NeoForgeEvents;
@@ -23,6 +25,7 @@ import net.neoforged.neoforge.common.NeoForge;
 public class PhysX4mc {
     public static final String MODID = "physx4mc";
     public static final Logger LOGGER = LogUtils.getLogger();
+    private static final MechanicsApi MECHANICS_API = ServerMechanicsApi.INSTANCE;
 
     public PhysX4mc(IEventBus modEventBus, ModContainer modContainer) {
         modEventBus.addListener(this::commonSetup);
@@ -58,5 +61,9 @@ public class PhysX4mc {
             builder.append(backend.id());
         }
         return builder.length() == 0 ? "<none>" : builder.toString();
+    }
+
+    public static MechanicsApi api() {
+        return MECHANICS_API;
     }
 }

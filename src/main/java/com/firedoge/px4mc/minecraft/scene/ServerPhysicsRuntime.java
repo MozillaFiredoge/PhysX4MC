@@ -23,6 +23,12 @@ import com.firedoge.px4mc.api.PhysicsQuaternion;
 import com.firedoge.px4mc.api.PhysicsVector;
 import com.firedoge.px4mc.api.PhysicsWorldConfig;
 import com.firedoge.px4mc.config.PhysXConfig;
+import com.firedoge.px4mc.mechanics.MechanicsBodyId;
+import com.firedoge.px4mc.mechanics.MechanicsBodyRole;
+import com.firedoge.px4mc.mechanics.MechanicsBodySnapshot;
+import com.firedoge.px4mc.mechanics.MechanicsBodyType;
+import com.firedoge.px4mc.mechanics.MechanicsBoxDefinition;
+import com.firedoge.px4mc.mechanics.MechanicsDebugProxy;
 import com.firedoge.px4mc.physics.PhysicsManager;
 import com.mojang.math.Transformation;
 
@@ -59,6 +65,7 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
     private final PhysicsSceneManager scenes = new PhysicsSceneManager();
     private final Map<String, SceneState> states = new LinkedHashMap<>();
     private final Map<PhysicsObjectId, EntityBinding> entityBindings = new LinkedHashMap<>();
+    private final Map<PhysicsObjectId, MechanicsBodyMetadata> mechanicsBodies = new LinkedHashMap<>();
     private final Map<String, Map<Long, TerrainCollider>> terrainColliders = new LinkedHashMap<>();
     private final Map<String, Map<Long, Set<Long>>> terrainChunks = new LinkedHashMap<>();
     private final Map<String, LinkedHashSet<Long>> terrainBuildQueues = new LinkedHashMap<>();
@@ -234,6 +241,7 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
     public synchronized int clearAll() {
         int removed = 0;
         entityBindings.clear();
+        mechanicsBodies.clear();
         terrainColliders.clear();
         terrainChunks.clear();
         terrainBuildQueues.clear();
@@ -258,6 +266,7 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
     public synchronized int clearLevel(ServerLevel level) {
         String sceneKey = sceneKey(level);
         removeBindingsForScene(level, sceneKey);
+        removeMechanicsBodiesForScene(sceneKey);
         terrainColliders.remove(sceneKey);
         terrainChunks.remove(sceneKey);
         terrainBuildQueues.remove(sceneKey);
@@ -283,6 +292,180 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
     public synchronized Optional<ServerPhysicsScene> existingScene(ServerLevel level) {
         SceneState state = states.get(sceneKey(level));
         return state == null ? Optional.empty() : Optional.of(state.scene());
+    }
+
+    public synchronized MechanicsBodySnapshot createMechanicsDynamicBox(ServerLevel level, MechanicsBoxDefinition definition) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(definition, "definition");
+        PhysicsVector halfExtents = definition.halfExtents();
+        ServerPhysicsScene scene = sceneFor(level);
+        PhysicsObject object = scene.createDynamicBox(
+                positiveFloat(halfExtents.x(), "halfExtentX"),
+                positiveFloat(halfExtents.y(), "halfExtentY"),
+                positiveFloat(halfExtents.z(), "halfExtentZ"),
+                definition.pose(),
+                definition.mass()
+        );
+        MechanicsBodyMetadata metadata = new MechanicsBodyMetadata(
+                sceneKey(level),
+                level.dimension(),
+                MechanicsBodyType.DYNAMIC_BOX,
+                definition.role(),
+                halfExtents,
+                definition.mass()
+        );
+        mechanicsBodies.put(object.id(), metadata);
+        return mechanicsSnapshot(object, metadata);
+    }
+
+    public synchronized Optional<MechanicsBodySnapshot> mechanicsSnapshot(ServerLevel level, MechanicsBodyId id) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(id, "id");
+        PhysicsObjectId objectId = physicsObjectId(id);
+        MechanicsBodyMetadata metadata = mechanicsBodies.get(objectId);
+        if (metadata == null || !metadata.levelKey().equals(level.dimension())) {
+            return Optional.empty();
+        }
+        SceneState state = states.get(metadata.sceneKey());
+        if (state == null || state.scene().isClosed()) {
+            mechanicsBodies.remove(objectId);
+            return Optional.empty();
+        }
+        Optional<PhysicsObject> object = state.scene().object(objectId);
+        if (object.isEmpty()) {
+            mechanicsBodies.remove(objectId);
+            return Optional.empty();
+        }
+        return Optional.of(mechanicsSnapshot(object.get(), metadata));
+    }
+
+    public synchronized List<MechanicsBodySnapshot> mechanicsSnapshots(ServerLevel level) {
+        Objects.requireNonNull(level, "level");
+        String sceneKey = sceneKey(level);
+        SceneState state = states.get(sceneKey);
+        if (state == null || state.scene().isClosed()) {
+            return List.of();
+        }
+        List<MechanicsBodySnapshot> snapshots = new ArrayList<>();
+        for (Map.Entry<PhysicsObjectId, MechanicsBodyMetadata> entry : List.copyOf(mechanicsBodies.entrySet())) {
+            MechanicsBodyMetadata metadata = entry.getValue();
+            if (!metadata.sceneKey().equals(sceneKey)) {
+                continue;
+            }
+            Optional<PhysicsObject> object = state.scene().object(entry.getKey());
+            if (object.isEmpty()) {
+                mechanicsBodies.remove(entry.getKey());
+                continue;
+            }
+            snapshots.add(mechanicsSnapshot(object.get(), metadata));
+        }
+        return List.copyOf(snapshots);
+    }
+
+    public synchronized boolean setMechanicsLinearVelocity(ServerLevel level, MechanicsBodyId id, PhysicsVector velocity) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(velocity, "velocity");
+        Optional<PhysicsObject> object = mechanicsObject(level, id);
+        if (object.isEmpty()) {
+            return false;
+        }
+        object.get().setLinearVelocity(velocity);
+        return true;
+    }
+
+    public synchronized boolean setMechanicsPose(ServerLevel level, MechanicsBodyId id, PhysicsPose pose) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(pose, "pose");
+        Optional<PhysicsObject> object = mechanicsObject(level, id);
+        if (object.isEmpty()) {
+            return false;
+        }
+        object.get().setPose(pose);
+        return true;
+    }
+
+    public synchronized boolean applyMechanicsLinearImpulse(ServerLevel level, MechanicsBodyId id, PhysicsVector impulse) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(impulse, "impulse");
+        PhysicsObjectId objectId = physicsObjectId(id);
+        MechanicsBodyMetadata metadata = mechanicsBodies.get(objectId);
+        if (metadata == null || metadata.mass() <= 0.0F) {
+            return false;
+        }
+        Optional<PhysicsObject> object = mechanicsObject(level, id);
+        if (object.isEmpty()) {
+            return false;
+        }
+        PhysicsVector velocity = object.get().linearVelocity();
+        double invMass = 1.0D / metadata.mass();
+        object.get().setLinearVelocity(new PhysicsVector(
+                velocity.x() + impulse.x() * invMass,
+                velocity.y() + impulse.y() * invMass,
+                velocity.z() + impulse.z() * invMass
+        ));
+        return true;
+    }
+
+    public synchronized boolean removeMechanicsBody(ServerLevel level, MechanicsBodyId id) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(id, "id");
+        PhysicsObjectId objectId = physicsObjectId(id);
+        MechanicsBodyMetadata metadata = mechanicsBodies.get(objectId);
+        if (metadata == null || !metadata.levelKey().equals(level.dimension())) {
+            return false;
+        }
+        SceneState state = states.get(metadata.sceneKey());
+        if (state == null || state.scene().isClosed()) {
+            mechanicsBodies.remove(objectId);
+            return false;
+        }
+        discardBoundEntity(level, objectId);
+        mechanicsBodies.remove(objectId);
+        return state.scene().removeObject(objectId);
+    }
+
+    public synchronized Optional<MechanicsDebugProxy> showMechanicsDebugProxy(ServerLevel level, MechanicsBodyId id) {
+        return showMechanicsDebugProxy(level, id, DEBUG_PROXY_BLOCK);
+    }
+
+    public synchronized Optional<MechanicsDebugProxy> showMechanicsDebugProxy(ServerLevel level, MechanicsBodyId id, BlockState displayState) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(displayState, "displayState");
+        PhysicsObjectId objectId = physicsObjectId(id);
+        Optional<PhysicsObject> maybeObject = mechanicsObject(level, id);
+        if (maybeObject.isEmpty()) {
+            return Optional.empty();
+        }
+        MechanicsBodyMetadata metadata = mechanicsBodies.get(objectId);
+        if (metadata == null) {
+            return Optional.empty();
+        }
+
+        EntityBinding existing = entityBindings.get(objectId);
+        if (existing != null && existing.sceneKey().equals(metadata.sceneKey())) {
+            Entity existingEntity = level.getEntity(existing.entityId());
+            if (existingEntity != null && !existingEntity.isRemoved()) {
+                return Optional.of(new MechanicsDebugProxy(id, existing.entityId(), false));
+            }
+            entityBindings.remove(objectId);
+        }
+
+        Display.BlockDisplay entity = createDebugEntity(level, maybeObject.get(), metadata.halfExtents(), displayState);
+        if (!level.addFreshEntity(entity)) {
+            return Optional.empty();
+        }
+        entityBindings.put(objectId, new EntityBinding(metadata.sceneKey(), metadata.levelKey(), objectId, entity.getUUID(), metadata.halfExtents(), displayState));
+        return Optional.of(new MechanicsDebugProxy(id, entity.getUUID(), true));
+    }
+
+    public synchronized boolean hideMechanicsDebugProxy(ServerLevel level, MechanicsBodyId id) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(id, "id");
+        return discardBoundEntity(level, physicsObjectId(id)) != null;
     }
 
     public synchronized SpawnedDebugBox spawnDebugBox(ServerLevel level, Vec3 position) {
@@ -321,7 +504,7 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
             throw new IllegalStateException("Failed to spawn debug entity for physics object " + box.id());
         }
 
-        EntityBinding binding = new EntityBinding(sceneKey(level), level.dimension(), box.id(), entity.getUUID(), halfExtents);
+        EntityBinding binding = new EntityBinding(sceneKey(level), level.dimension(), box.id(), entity.getUUID(), halfExtents, DEBUG_PROXY_BLOCK);
         entityBindings.put(box.id(), binding);
         return new SpawnedDebugBox(box, entity.getUUID(), queuedTerrainChunks, halfExtents, mass);
     }
@@ -457,6 +640,7 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
         PhysicsObject object = maybeObject.get();
         PhysicsObjectSnapshot snapshot = object.snapshot();
         UUID entityId = discardBoundEntity(level, objectId);
+        mechanicsBodies.remove(objectId);
         if (!state.scene().removeObject(objectId)) {
             return Optional.empty();
         }
@@ -472,6 +656,7 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
     @Override
     public synchronized void close() {
         entityBindings.clear();
+        mechanicsBodies.clear();
         terrainColliders.clear();
         terrainChunks.clear();
         terrainBuildQueues.clear();
@@ -498,6 +683,54 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
     private static String sceneKey(ServerLevel level) {
         ResourceKey<Level> dimension = level.dimension();
         return dimension.location().toString();
+    }
+
+    private Optional<PhysicsObject> mechanicsObject(ServerLevel level, MechanicsBodyId id) {
+        PhysicsObjectId objectId = physicsObjectId(id);
+        MechanicsBodyMetadata metadata = mechanicsBodies.get(objectId);
+        if (metadata == null || !metadata.levelKey().equals(level.dimension())) {
+            return Optional.empty();
+        }
+        SceneState state = states.get(metadata.sceneKey());
+        if (state == null || state.scene().isClosed()) {
+            mechanicsBodies.remove(objectId);
+            return Optional.empty();
+        }
+        Optional<PhysicsObject> object = state.scene().object(objectId);
+        if (object.isEmpty()) {
+            mechanicsBodies.remove(objectId);
+        }
+        return object;
+    }
+
+    private static MechanicsBodySnapshot mechanicsSnapshot(PhysicsObject object, MechanicsBodyMetadata metadata) {
+        PhysicsObjectSnapshot snapshot = object.snapshot();
+        return new MechanicsBodySnapshot(
+                mechanicsBodyId(snapshot.id()),
+                metadata.levelKey(),
+                metadata.type(),
+                metadata.role(),
+                snapshot.pose(),
+                snapshot.linearVelocity(),
+                metadata.halfExtents(),
+                metadata.mass(),
+                snapshot.closed()
+        );
+    }
+
+    private static MechanicsBodyId mechanicsBodyId(PhysicsObjectId id) {
+        return new MechanicsBodyId(id.value());
+    }
+
+    private static PhysicsObjectId physicsObjectId(MechanicsBodyId id) {
+        return new PhysicsObjectId(id.value());
+    }
+
+    private static float positiveFloat(double value, String name) {
+        if (value <= 0.0D || value > Float.MAX_VALUE || Double.isNaN(value)) {
+            throw new IllegalArgumentException(name + " must be a finite positive float");
+        }
+        return (float) value;
     }
 
     private static int debugProxySyncLimit() {
@@ -907,6 +1140,16 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
         }
     }
 
+    public synchronized int refreshTerrainCollisionAt(ServerLevel level, BlockPos pos) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(pos, "pos");
+        String sceneKey = sceneKey(level);
+        long chunkKey = ChunkPos.asLong(pos);
+        int removed = removeTerrainCollisionForChunk(sceneKey, chunkKey);
+        queueLoadedTerrainChunk(level, chunkKey, true);
+        return removed;
+    }
+
     private int createTerrainCollider(
             ServerPhysicsScene scene,
             long chunkKey,
@@ -1090,13 +1333,13 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
                 missingEntities++;
                 PhysicsObject object = maybeObject.get();
                 long recreateStart = System.nanoTime();
-                Display.BlockDisplay replacement = createDebugEntity(level, object, binding.halfExtents());
+                Display.BlockDisplay replacement = createDebugEntity(level, object, binding.halfExtents(), binding.displayState());
                 if (!level.addFreshEntity(replacement)) {
                     recreateNanos += System.nanoTime() - recreateStart;
                     continue;
                 }
                 recreateNanos += System.nanoTime() - recreateStart;
-                entityBindings.put(object.id(), new EntityBinding(binding.sceneKey(), binding.levelKey(), object.id(), replacement.getUUID(), binding.halfExtents()));
+                entityBindings.put(object.id(), new EntityBinding(binding.sceneKey(), binding.levelKey(), object.id(), replacement.getUUID(), binding.halfExtents(), binding.displayState()));
                 entity = replacement;
                 recreated++;
             }
@@ -1133,12 +1376,16 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
     }
 
     private Display.BlockDisplay createDebugEntity(ServerLevel level, PhysicsObject object, PhysicsVector halfExtents) {
+        return createDebugEntity(level, object, halfExtents, DEBUG_PROXY_BLOCK);
+    }
+
+    private Display.BlockDisplay createDebugEntity(ServerLevel level, PhysicsObject object, PhysicsVector halfExtents, BlockState displayState) {
         Display.BlockDisplay entity = new Display.BlockDisplay(EntityType.BLOCK_DISPLAY, level);
         entity.setNoGravity(true);
         entity.setInvulnerable(true);
         entity.setCustomName(Component.literal("PhysX " + object.id().toString().substring(0, 8)));
         entity.setCustomNameVisible(false);
-        applyInitialDebugDisplayState(entity, object.pose(), halfExtents);
+        applyInitialDebugDisplayState(entity, object.pose(), halfExtents, displayState);
         return entity;
     }
 
@@ -1162,7 +1409,7 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
         return dx * dx + dy * dy + dz * dz <= 1.0E-6D;
     }
 
-    private void applyInitialDebugDisplayState(Display.BlockDisplay entity, PhysicsPose pose, PhysicsVector halfExtents) {
+    private void applyInitialDebugDisplayState(Display.BlockDisplay entity, PhysicsPose pose, PhysicsVector halfExtents, BlockState displayState) {
         CompoundTag tag = new CompoundTag();
         PhysicsVector position = pose.position();
         tag.put("Pos", doubleList(position.x(), position.y(), position.z()));
@@ -1170,7 +1417,7 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
         tag.put("Rotation", floatList(0.0F, 0.0F));
         tag.putBoolean("NoGravity", true);
         tag.putBoolean("Invulnerable", true);
-        tag.put("block_state", NbtUtils.writeBlockState(DEBUG_PROXY_BLOCK));
+        tag.put("block_state", NbtUtils.writeBlockState(displayState));
         tag.putFloat("width", (float) (halfExtents.x() * 2.0D));
         tag.putFloat("height", (float) (halfExtents.y() * 2.0D));
         tag.putFloat("view_range", 64.0F);
@@ -1265,6 +1512,14 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
                 entity.discard();
             }
             entityBindings.remove(binding.objectId());
+        }
+    }
+
+    private void removeMechanicsBodiesForScene(String sceneKey) {
+        for (Map.Entry<PhysicsObjectId, MechanicsBodyMetadata> entry : List.copyOf(mechanicsBodies.entrySet())) {
+            if (entry.getValue().sceneKey().equals(sceneKey)) {
+                mechanicsBodies.remove(entry.getKey());
+            }
         }
     }
 
@@ -1397,7 +1652,17 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
     public record RemovedDebugBox(PhysicsObjectId objectId, UUID entityId, PhysicsVector lastPosition, PhysicsVector lastVelocity) {
     }
 
-    private record EntityBinding(String sceneKey, ResourceKey<Level> levelKey, PhysicsObjectId objectId, UUID entityId, PhysicsVector halfExtents) {
+    private record EntityBinding(String sceneKey, ResourceKey<Level> levelKey, PhysicsObjectId objectId, UUID entityId, PhysicsVector halfExtents, BlockState displayState) {
+    }
+
+    private record MechanicsBodyMetadata(
+            String sceneKey,
+            ResourceKey<Level> levelKey,
+            MechanicsBodyType type,
+            MechanicsBodyRole role,
+            PhysicsVector halfExtents,
+            float mass
+    ) {
     }
 
     private record TerrainCollider(PhysicsObject object, long chunkKey) {

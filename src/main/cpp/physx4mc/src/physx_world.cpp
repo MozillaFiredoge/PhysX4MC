@@ -111,6 +111,10 @@ void set_linear_velocity(std::uint64_t body, double velocity_x, double velocity_
     PhysXContext::set_linear_velocity(body, velocity_x, velocity_y, velocity_z);
 }
 
+bool get_linear_velocity(std::uint64_t body, double* output) {
+    return PhysXContext::get_linear_velocity(body, output);
+}
+
 void destroy_body(std::uint64_t body) {
     PhysXContext::destroy_body(body);
 }

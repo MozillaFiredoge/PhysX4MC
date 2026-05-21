@@ -3,7 +3,10 @@ package com.firedoge.px4mc.platform.neoforge;
 import com.firedoge.px4mc.PhysX4mc;
 import com.firedoge.px4mc.backend.physx.PhysXBackend;
 import com.firedoge.px4mc.command.Px4mcCommands;
+import com.firedoge.px4mc.minecraft.player.PlayerPhysicsManager;
+import com.firedoge.px4mc.minecraft.player.PlayerProxyManager;
 import com.firedoge.px4mc.minecraft.scene.ServerPhysicsRuntime;
+import com.firedoge.px4mc.minecraft.sublevel.SubLevelManager;
 import com.firedoge.px4mc.physics.PhysicsManager;
 
 import net.minecraft.core.Direction;
@@ -33,7 +36,10 @@ public final class NeoForgeEvents {
 
     @SubscribeEvent
     public void onServerTick(ServerTickEvent.Post event) {
+        PlayerProxyManager.INSTANCE.syncBeforePhysics(event.getServer());
         ServerPhysicsRuntime.INSTANCE.tick(event.getServer());
+        PlayerPhysicsManager.INSTANCE.tick(event.getServer());
+        SubLevelManager.INSTANCE.tick(event.getServer());
     }
 
     @SubscribeEvent
@@ -79,6 +85,9 @@ public final class NeoForgeEvents {
 
     @SubscribeEvent
     public void onServerStopping(ServerStoppingEvent event) {
+        PlayerProxyManager.INSTANCE.close(event.getServer());
+        PlayerPhysicsManager.INSTANCE.close(event.getServer());
+        SubLevelManager.INSTANCE.close(event.getServer());
         ServerPhysicsRuntime.INSTANCE.close(event.getServer());
     }
 

@@ -121,6 +121,13 @@ JNIEXPORT void JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_nativeS
     jdouble velocity_z
 );
 
+JNIEXPORT jboolean JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_nativeGetLinearVelocity(
+    JNIEnv* env,
+    jclass type,
+    jlong body_handle,
+    jdoubleArray output
+);
+
 JNIEXPORT void JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_nativeDestroyBody(
     JNIEnv* env,
     jclass type,

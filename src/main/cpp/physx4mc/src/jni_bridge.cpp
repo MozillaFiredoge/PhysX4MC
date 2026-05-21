@@ -207,6 +207,23 @@ JNIEXPORT void JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_nativeS
     );
 }
 
+JNIEXPORT jboolean JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_nativeGetLinearVelocity(
+    JNIEnv* env,
+    jclass,
+    jlong body_handle,
+    jdoubleArray output
+) {
+    if (output == nullptr || env->GetArrayLength(output) < 3) {
+        return JNI_FALSE;
+    }
+    jdouble values[3] = {};
+    if (!px4mc::get_linear_velocity(static_cast<std::uint64_t>(body_handle), values)) {
+        return JNI_FALSE;
+    }
+    env->SetDoubleArrayRegion(output, 0, 3, values);
+    return JNI_TRUE;
+}
+
 JNIEXPORT void JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_nativeDestroyBody(
     JNIEnv*,
     jclass,

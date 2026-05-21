@@ -59,6 +59,12 @@ public final class PhysXBody implements PhysicsBody {
 
     @Override
     public PhysicsVector linearVelocity() {
+        if (!closed && nativeHandle != 0L && PhysXNative.isLoaded()) {
+            double[] velocityData = new double[3];
+            if (PhysXNative.nativeGetLinearVelocity(nativeHandle, velocityData)) {
+                linearVelocity = new PhysicsVector(velocityData[0], velocityData[1], velocityData[2]);
+            }
+        }
         return linearVelocity;
     }
 

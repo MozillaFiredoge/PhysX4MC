@@ -76,6 +76,8 @@ public final class PhysXNative {
 
     static native void nativeSetLinearVelocity(long bodyHandle, double velocityX, double velocityY, double velocityZ);
 
+    static native boolean nativeGetLinearVelocity(long bodyHandle, double[] output);
+
     static native void nativeDestroyBody(long bodyHandle);
 
     static native void nativeDestroyShape(long shapeHandle);

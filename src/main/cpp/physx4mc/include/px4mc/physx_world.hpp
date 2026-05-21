@@ -15,6 +15,7 @@ std::uint64_t create_dynamic_body(WorldHandle world, std::uint64_t shape, double
 bool get_body_pose(std::uint64_t body, double* output);
 void set_body_pose(std::uint64_t body, double position_x, double position_y, double position_z, double rotation_x, double rotation_y, double rotation_z, double rotation_w);
 void set_linear_velocity(std::uint64_t body, double velocity_x, double velocity_y, double velocity_z);
+bool get_linear_velocity(std::uint64_t body, double* output);
 void destroy_body(std::uint64_t body);
 void destroy_shape(std::uint64_t shape);
 }

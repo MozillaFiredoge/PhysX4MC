@@ -52,6 +52,24 @@ physx::PxTransform make_transform(
         rotation
     );
 }
+
+physx::PxFilterFlags ccd_filter_shader(
+    physx::PxFilterObjectAttributes attributes0,
+    physx::PxFilterData,
+    physx::PxFilterObjectAttributes attributes1,
+    physx::PxFilterData,
+    physx::PxPairFlags& pair_flags,
+    const void*,
+    physx::PxU32
+) {
+    if (physx::PxFilterObjectIsTrigger(attributes0) || physx::PxFilterObjectIsTrigger(attributes1)) {
+        pair_flags = physx::PxPairFlag::eTRIGGER_DEFAULT;
+        return physx::PxFilterFlag::eDEFAULT;
+    }
+
+    pair_flags = physx::PxPairFlag::eCONTACT_DEFAULT | physx::PxPairFlag::eDETECT_CCD_CONTACT;
+    return physx::PxFilterFlag::eDEFAULT;
+}
 #endif
 }
 
@@ -99,7 +117,9 @@ WorldHandle PhysXContext::create_world(double gravity_x, double gravity_y, doubl
             static_cast<physx::PxReal>(gravity_z)
         );
         scene_desc.cpuDispatcher = world->dispatcher;
-        scene_desc.filterShader = physx::PxDefaultSimulationFilterShader;
+        scene_desc.filterShader = ccd_filter_shader;
+        scene_desc.flags |= physx::PxSceneFlag::eENABLE_CCD;
+        scene_desc.ccdMaxPasses = 4;
         return scene_desc;
     };
 
@@ -345,6 +365,7 @@ std::uint64_t PhysXContext::create_dynamic_body(
         body->release();
         return 0;
     }
+    body->setRigidBodyFlag(physx::PxRigidBodyFlag::eENABLE_CCD, true);
     physx::PxRigidBodyExt::updateMassAndInertia(*body, mass);
     found->second->scene->addActor(*body);
     return to_handle(body);
@@ -415,6 +436,26 @@ void PhysXContext::set_linear_velocity(std::uint64_t body_handle, double velocit
         static_cast<physx::PxReal>(velocity_y),
         static_cast<physx::PxReal>(velocity_z)
     ));
+#endif
+}
+
+bool PhysXContext::get_linear_velocity(std::uint64_t body_handle, double* output) {
+#if PX4MC_WITH_PHYSX
+    physx::PxRigidActor* body = from_handle<physx::PxRigidActor>(body_handle);
+    if (body == nullptr || output == nullptr) {
+        return false;
+    }
+    physx::PxRigidDynamic* dynamic = body->is<physx::PxRigidDynamic>();
+    if (dynamic == nullptr) {
+        return false;
+    }
+    const physx::PxVec3 velocity = dynamic->getLinearVelocity();
+    output[0] = velocity.x;
+    output[1] = velocity.y;
+    output[2] = velocity.z;
+    return true;
+#else
+    return false;
 #endif
 }
 

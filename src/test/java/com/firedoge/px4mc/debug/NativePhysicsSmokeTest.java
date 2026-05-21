@@ -23,6 +23,7 @@ public final class NativePhysicsSmokeTest {
         runMinimalLoop();
         runLifecycleChecks();
         runGpuDynamicsRequestCheck();
+        runCcdChecks();
         runSceneLayerChecks();
         System.out.println("Native physics lifecycle checks passed");
         System.out.println("Physics scene layer checks passed");
@@ -117,6 +118,28 @@ public final class NativePhysicsSmokeTest {
                 System.out.println("GPU dynamics request check passed: enabled=" + world.gpuDynamicsEnabled()
                         + " status=" + world.gpuDynamicsStatus());
             }
+        }
+    }
+
+    private static void runCcdChecks() {
+        PhysXBackend backend = new PhysXBackend();
+        try (PhysicsWorld world = backend.createWorld(new PhysicsWorldConfig(PhysicsVector.ZERO, 1.0F / 20.0F, 1));
+             PhysicsShape wallShape = world.createBoxShape(0.05F, 2.0F, 2.0F);
+             PhysicsShape projectileShape = world.createBoxShape(0.25F, 0.25F, 0.25F);
+             PhysicsBody ignoredWall = world.createBody(RigidBodyDefinition.staticBody(
+                     new PhysicsPose(new PhysicsVector(0.0D, 0.0D, 0.0D), PhysicsQuaternion.IDENTITY),
+                     wallShape
+             ));
+             PhysicsBody projectile = world.createBody(RigidBodyDefinition.dynamic(
+                     new PhysicsPose(new PhysicsVector(-3.0D, 0.0D, 0.0D), PhysicsQuaternion.IDENTITY),
+                     projectileShape,
+                     1.0F
+             ))) {
+            projectile.setLinearVelocity(new PhysicsVector(200.0D, 0.0D, 0.0D));
+            world.step(1.0F / 20.0F);
+            PhysicsVector position = projectile.pose().position();
+            assertTrue(position.x() < 0.0D, "CCD should prevent the projectile from crossing the thin wall; x=" + position.x());
+            System.out.printf("Native CCD check passed: projectileX=%.4f%n", position.x());
         }
     }
 
