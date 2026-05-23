@@ -150,6 +150,46 @@ JNIEXPORT jlong JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_native
     ));
 }
 
+JNIEXPORT jlong JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_nativeCreateDynamicCompoundBoxBody(
+    JNIEnv* env,
+    jclass,
+    jlong world_handle,
+    jdoubleArray boxes,
+    jint box_count,
+    jdouble position_x,
+    jdouble position_y,
+    jdouble position_z,
+    jdouble rotation_x,
+    jdouble rotation_y,
+    jdouble rotation_z,
+    jdouble rotation_w,
+    jfloat mass
+) {
+    if (boxes == nullptr || box_count <= 0 || env->GetArrayLength(boxes) < box_count * 6) {
+        return 0;
+    }
+
+    jdouble* values = env->GetDoubleArrayElements(boxes, nullptr);
+    if (values == nullptr) {
+        return 0;
+    }
+    std::uint64_t body = px4mc::create_dynamic_compound_box_body(
+        static_cast<px4mc::WorldHandle>(world_handle),
+        values,
+        static_cast<int>(box_count),
+        position_x,
+        position_y,
+        position_z,
+        rotation_x,
+        rotation_y,
+        rotation_z,
+        rotation_w,
+        mass
+    );
+    env->ReleaseDoubleArrayElements(boxes, values, JNI_ABORT);
+    return static_cast<jlong>(body);
+}
+
 JNIEXPORT jboolean JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_nativeGetBodyPose(
     JNIEnv* env,
     jclass,

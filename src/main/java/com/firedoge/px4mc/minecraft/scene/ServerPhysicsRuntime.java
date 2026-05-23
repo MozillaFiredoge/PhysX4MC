@@ -18,6 +18,7 @@ import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 import com.firedoge.px4mc.api.PhysicsBackend;
+import com.firedoge.px4mc.api.PhysicsBoxCollider;
 import com.firedoge.px4mc.api.PhysicsPose;
 import com.firedoge.px4mc.api.PhysicsQuaternion;
 import com.firedoge.px4mc.api.PhysicsVector;
@@ -28,6 +29,7 @@ import com.firedoge.px4mc.mechanics.MechanicsBodyRole;
 import com.firedoge.px4mc.mechanics.MechanicsBodySnapshot;
 import com.firedoge.px4mc.mechanics.MechanicsBodyType;
 import com.firedoge.px4mc.mechanics.MechanicsBoxDefinition;
+import com.firedoge.px4mc.mechanics.MechanicsCompoundBoxDefinition;
 import com.firedoge.px4mc.mechanics.MechanicsDebugProxy;
 import com.firedoge.px4mc.physics.PhysicsManager;
 import com.mojang.math.Transformation;
@@ -312,6 +314,24 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
                 MechanicsBodyType.DYNAMIC_BOX,
                 definition.role(),
                 halfExtents,
+                definition.mass()
+        );
+        mechanicsBodies.put(object.id(), metadata);
+        return mechanicsSnapshot(object, metadata);
+    }
+
+    public synchronized MechanicsBodySnapshot createMechanicsDynamicCompoundBox(ServerLevel level, MechanicsCompoundBoxDefinition definition) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(definition, "definition");
+        List<PhysicsBoxCollider> boxes = definition.boxes();
+        ServerPhysicsScene scene = sceneFor(level);
+        PhysicsObject object = scene.createDynamicCompoundBox(boxes, definition.pose(), definition.mass());
+        MechanicsBodyMetadata metadata = new MechanicsBodyMetadata(
+                sceneKey(level),
+                level.dimension(),
+                MechanicsBodyType.DYNAMIC_COMPOUND_BOX,
+                definition.role(),
+                definition.halfExtents(),
                 definition.mass()
         );
         mechanicsBodies.put(object.id(), metadata);

@@ -10,6 +10,7 @@ import com.firedoge.px4mc.backend.physx.PhysXNative;
 import com.firedoge.px4mc.config.PhysXConfig;
 import com.firedoge.px4mc.mechanics.MechanicsApi;
 import com.firedoge.px4mc.mechanics.ServerMechanicsApi;
+import com.firedoge.px4mc.network.PhysX4mcNetworking;
 import com.firedoge.px4mc.nativebridge.NativeException;
 import com.firedoge.px4mc.physics.PhysicsManager;
 import com.firedoge.px4mc.platform.neoforge.NeoForgeEvents;
@@ -29,6 +30,7 @@ public class PhysX4mc {
 
     public PhysX4mc(IEventBus modEventBus, ModContainer modContainer) {
         modEventBus.addListener(this::commonSetup);
+        modEventBus.addListener(PhysX4mcNetworking::registerPayloads);
         modContainer.registerConfig(ModConfig.Type.COMMON, PhysXConfig.SPEC);
         PhysicsManager.INSTANCE.registerBackend(new PhysXBackend());
         NeoForge.EVENT_BUS.register(new NeoForgeEvents());

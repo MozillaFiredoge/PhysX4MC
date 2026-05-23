@@ -19,6 +19,10 @@ public final class SubLevelTransform {
         return new SubLevelTransform(body.pose());
     }
 
+    public static SubLevelTransform from(PhysicsPose pose) {
+        return new SubLevelTransform(pose);
+    }
+
     public PhysicsPose pose() {
         return pose;
     }
@@ -36,6 +40,11 @@ public final class SubLevelTransform {
     public PhysicsVector worldDirectionToLocal(PhysicsVector worldDirection) {
         Objects.requireNonNull(worldDirection, "worldDirection");
         return inverseRotate(pose.rotation(), worldDirection);
+    }
+
+    public PhysicsVector localDirectionToWorld(PhysicsVector localDirection) {
+        Objects.requireNonNull(localDirection, "localDirection");
+        return rotate(pose.rotation(), localDirection);
     }
 
     public PhysicsVector localToWorld(PhysicsVector localPosition) {

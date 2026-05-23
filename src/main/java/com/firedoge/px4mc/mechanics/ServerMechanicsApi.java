@@ -48,6 +48,11 @@ public final class ServerMechanicsApi implements MechanicsApi {
         }
 
         @Override
+        public MechanicsBodySnapshot createDynamicCompoundBox(MechanicsCompoundBoxDefinition definition) {
+            return ServerPhysicsRuntime.INSTANCE.createMechanicsDynamicCompoundBox(level, definition);
+        }
+
+        @Override
         public Optional<MechanicsBodySnapshot> snapshot(MechanicsBodyId id) {
             return ServerPhysicsRuntime.INSTANCE.mechanicsSnapshot(level, id);
         }

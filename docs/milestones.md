@@ -519,22 +519,23 @@ Status: implemented. Details are in `docs/sublevel.md`.
 
 ## M23.1: SubLevel Interaction Contract
 
-Goal: make the next sublevel work compatible with a Sable-like chunk-section
-model and PhysX-owned player movement before adding more gameplay behavior.
+Goal: make the next sublevel work compatible with a Sable-like plot-chunk model
+and PhysX-owned player movement before adding more gameplay behavior.
 
 - Treat the player as a PhysX object when participating in this physics world.
   PhysX owns the physical player pose; Minecraft synchronizes from PhysX after
   the physics step.
-- Treat a sublevel as a chunk-section-like block store inside the host world.
-  The host world's server tick is the sublevel tick.
-- Define section-local block storage, local-to-world transforms, dirty shape
-  tracking, and bounded tick queues before adding deeper mixins.
+- Treat a sublevel as a reserved plot chunk/section block store inside the host
+  world. The host world's server tick is the sublevel tick.
+- Define plot id, plot chunk coordinates, section-local block storage,
+  local-to-world transforms, dirty shape tracking, and bounded tick queues before
+  adding deeper mixins.
 - Route player interaction through a world bridge that can transform raycasts,
   use, break, and place operations between host-world and sublevel-local
   coordinates.
 - Keep `BlockDisplay` entities as optional debug/render proxies only.
-- Delay block entities, normal entity capture, and full vanilla chunk injection
-  until the storage/query/tick contract is stable.
+- Delay block entities, normal entity capture, and broad chunk-cache injection
+  until the plot storage/query/tick contract is stable.
 
 Acceptance: the project has a written interaction contract that makes player
 physics ownership, sublevel tick ownership, cross-boundary interaction, and the
@@ -544,11 +545,12 @@ Status: implemented. Details are in `docs/sublevel-interaction-contract.md`.
 
 ## M23.2: Section-Local SubLevel Storage
 
-Goal: move sublevel internals from a captured block list to a chunk-section-like
-storage API before routing player interaction or rebuilding colliders from
-sublevel mutations.
+Goal: move sublevel internals from a captured block list to a section-local
+storage API that can later become plot chunk storage before routing player
+interaction or rebuilding colliders from sublevel mutations.
 
-- Add a `SubLevelSectionStorage` with one 16x16x16 local section.
+- Add a `SubLevelSectionStorage` with one 16x16x16 local section as the first
+  plot-compatible storage slice.
 - Store blocks by section-local coordinates while preserving source positions
   for legacy/debug lifecycle paths.
 - Expose block lookup, block state lookup, collision bounds lookup, and source
@@ -656,6 +658,86 @@ blocks and run `/px4mc sublevel break` to remove that block from sublevel
 storage and debug visuals while dirty state records the changed local position.
 
 Status: implemented. Details are in `docs/sublevel-interactions.md`.
+
+## M23.4.3: SubLevel Plot Chunk Presentation Contract
+
+Goal: capture the Sable-like client-side requirements before replacing
+`BlockDisplay` debug visuals or adding vanilla input mixins.
+
+- Treat `BlockDisplay` visuals as a temporary debug/prototype adapter.
+- Define the final target as a Sable-style plot chunk route, not only a custom
+  moving mesh.
+- Require server and client sublevel storage to be compatible with reserved plot
+  chunk coordinates, section-local blocks, dirty sections, and root transforms.
+- Require transformed block selection outlines for sublevel-local hits.
+- Require Minecraft-style block rendering and lighting through a plot/chunk
+  bridge, starting with bounded host-world light sampling at transformed block
+  positions.
+- Keep breaking overlays, particles, block entity rendering, and full vanilla
+  input routing as later implementation steps.
+- Avoid treating sublevels as ordinary entities for final rendering.
+
+Acceptance: the project has a written client presentation contract that
+separates plot storage, physics root, client plot mirror, outline rendering,
+render section integration, and lighting behavior.
+
+Status: documented. Details are in `docs/sublevel-client-presentation.md`.
+
+## M24: Plot Chunk SubLevel Foundation
+
+Goal: move the sublevel target from debug visuals toward a Sable-like plot chunk
+route, where sublevel content is represented as reserved chunk/section-local
+block data with a PhysX root transform.
+
+- Add a plot-compatible sublevel model: plot id, plot chunk coordinates,
+  section-local blocks, dirty sections, and root transform.
+- Add a client plot mirror for sublevel block states and root transforms.
+- Add focused mixin registration for the first plot bridge hooks.
+- Draw transformed block outlines for selected plot-local sublevel blocks.
+- Render sublevel blocks through a chunk-section-like path instead of one entity
+  per block.
+- Add bounded lighting lookup/cache for transformed plot-local block positions.
+- Keep `BlockDisplay` available as an optional debug visual.
+- Only after this layer is stable, route vanilla break/place/use input through
+  focused mixins.
+
+Status: in progress. The current code slice adds reserved plot metadata,
+server-side `PlotChunkHolder` ownership, server/client chunk-cache routing, and
+client tracking based on metadata payloads plus vanilla plot chunk packets.
+Client presentation now draws finalized plot chunks directly from client
+`LevelChunk` sections with vanilla block model rendering, host-world light/tint
+sampling, fluids, block entity rendering, and plot-chunk local selection
+outlines. Full Sable-like render-section compile/cache integration remains a
+later M24 slice.
+
+## M24.2: Client Plot State And Selection Outline
+
+Goal: give the client enough plot-local sublevel state to compute the selected
+sublevel block without asking the server every frame.
+
+- Register NeoForge play payloads for server-to-client sublevel tracking
+  metadata and root pose updates.
+- Sync sublevel id, plot coordinates, root pose, plot-origin transform, and plot
+  chunk positions to clients in the same dimension.
+- Send block contents through vanilla `ClientboundLevelChunkWithLightPacket`
+  packets for reserved plot chunks.
+- Maintain client-side plot chunk tracking keyed by Minecraft dimension id.
+- Reuse the same world-ray to sublevel-local raycast semantics as the
+  server-side `/px4mc sublevel pick` bridge.
+- Track the current client selected sublevel target each client tick.
+- Draw a transformed collision outline for the selected plot-local block while
+  keeping `BlockDisplay` as the current optional visual proxy.
+
+Acceptance: after assembling a visual sublevel, the client receives tracking
+metadata and plot chunks, can identify loaded plot chunks locally, and renders
+the plot block content at the physics body pose.
+
+Status: in progress. Tracking metadata payloads establish client sublevels,
+vanilla chunk packets populate client plot chunks, transform payloads update
+root pose, `SubLevelPlotRenderer` draws loaded plot content, and
+`ClientSubLevelSelection` draws a transformed outline for the current plot
+target. Vanilla hit-result replacement and breaking overlays remain later bridge
+work.
 
 ## First Target
 

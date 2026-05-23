@@ -7,7 +7,9 @@ public record SubLevelBreakResult(
         boolean removedSubLevel,
         int remainingBlocks,
         int dirtyBlocks,
-        int removedVisuals
+        int removedVisuals,
+        int connectedComponents,
+        int createdSubLevels
 ) {
     public SubLevelBreakResult {
         Objects.requireNonNull(pick, "pick");
@@ -19,6 +21,12 @@ public record SubLevelBreakResult(
         }
         if (removedVisuals < 0) {
             throw new IllegalArgumentException("removedVisuals must not be negative");
+        }
+        if (connectedComponents < 0) {
+            throw new IllegalArgumentException("connectedComponents must not be negative");
+        }
+        if (createdSubLevels < 0) {
+            throw new IllegalArgumentException("createdSubLevels must not be negative");
         }
     }
 }

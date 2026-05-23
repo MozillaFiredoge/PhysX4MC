@@ -1,10 +1,13 @@
 package com.firedoge.px4mc.minecraft.sublevel;
 
 import java.util.ArrayList;
-import java.util.BitSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 import com.firedoge.px4mc.api.PhysicsVector;
 
@@ -15,12 +18,10 @@ import net.minecraft.world.phys.AABB;
 
 public final class SubLevelSectionStorage {
     public static final int SECTION_SIZE = 16;
-    public static final int SECTION_VOLUME = SECTION_SIZE * SECTION_SIZE * SECTION_SIZE;
 
     private final BlockPos sourceOrigin;
-    private final SubLevelBlock[] blocks = new SubLevelBlock[SECTION_VOLUME];
-    private final BitSet dirtyIndexes = new BitSet(SECTION_VOLUME);
-    private int blockCount;
+    private final Map<BlockPos, SubLevelBlock> blocksByLocalPos = new LinkedHashMap<>();
+    private final Set<BlockPos> dirtyLocalPositions = new LinkedHashSet<>();
 
     private SubLevelSectionStorage(BlockPos sourceOrigin) {
         this.sourceOrigin = Objects.requireNonNull(sourceOrigin, "sourceOrigin").immutable();
@@ -44,29 +45,25 @@ public final class SubLevelSectionStorage {
     }
 
     public int blockCount() {
-        return blockCount;
+        return blocksByLocalPos.size();
     }
 
     public boolean isEmpty() {
-        return blockCount == 0;
+        return blocksByLocalPos.isEmpty();
     }
 
     public List<SubLevelBlock> blocks() {
-        List<SubLevelBlock> result = new ArrayList<>(blockCount);
-        for (SubLevelBlock block : blocks) {
-            if (block != null) {
-                result.add(block);
-            }
-        }
-        return List.copyOf(result);
+        return List.copyOf(blocksByLocalPos.values());
     }
 
     public Optional<SubLevelBlock> block(BlockPos localPos) {
-        return Optional.ofNullable(blocks[index(localPos)]);
+        requireLocal(localPos);
+        return Optional.ofNullable(blocksByLocalPos.get(localPos));
     }
 
     public BlockState blockState(BlockPos localPos) {
-        SubLevelBlock block = blocks[index(localPos)];
+        requireLocal(localPos);
+        SubLevelBlock block = blocksByLocalPos.get(localPos);
         return block == null ? Blocks.AIR.defaultBlockState() : block.blockState();
     }
 
@@ -75,23 +72,21 @@ public final class SubLevelSectionStorage {
     }
 
     public boolean hasBlock(BlockPos localPos) {
-        return blocks[index(localPos)] != null;
+        requireLocal(localPos);
+        return blocksByLocalPos.containsKey(localPos);
     }
 
     public BlockPos toSourcePos(BlockPos localPos) {
-        requireSectionLocal(localPos);
+        requireLocal(localPos);
         return sourceOrigin.offset(localPos.getX(), localPos.getY(), localPos.getZ());
     }
 
     public void putBlock(SubLevelBlock block) {
         Objects.requireNonNull(block, "block");
-        requireSectionLocal(block.localPos());
-        int index = index(block.localPos());
-        if (blocks[index] == null) {
-            blockCount++;
-        }
-        blocks[index] = block;
-        dirtyIndexes.set(index);
+        requireLocal(block.localPos());
+        BlockPos localPos = block.localPos().immutable();
+        blocksByLocalPos.put(localPos, block);
+        dirtyLocalPositions.add(localPos);
     }
 
     public void setBlockState(BlockPos localPos, BlockState blockState, AABB localCollisionBounds) {
@@ -116,26 +111,24 @@ public final class SubLevelSectionStorage {
     }
 
     public Optional<SubLevelBlock> removeBlock(BlockPos localPos) {
-        int index = index(localPos);
-        SubLevelBlock previous = blocks[index];
-        if (previous != null) {
-            blocks[index] = null;
-            blockCount--;
-        }
-        dirtyIndexes.set(index);
+        requireLocal(localPos);
+        BlockPos immutable = localPos.immutable();
+        SubLevelBlock previous = blocksByLocalPos.remove(immutable);
+        dirtyLocalPositions.add(immutable);
         return Optional.ofNullable(previous);
     }
 
     public void markDirty(BlockPos localPos) {
-        dirtyIndexes.set(index(localPos));
+        requireLocal(localPos);
+        dirtyLocalPositions.add(localPos.immutable());
     }
 
     public boolean hasDirtyBlocks() {
-        return !dirtyIndexes.isEmpty();
+        return !dirtyLocalPositions.isEmpty();
     }
 
     public int dirtyBlockCount() {
-        return dirtyIndexes.cardinality();
+        return dirtyLocalPositions.size();
     }
 
     public List<BlockPos> dirtyLocalPositions() {
@@ -150,55 +143,45 @@ public final class SubLevelSectionStorage {
     }
 
     public void clearDirty() {
-        dirtyIndexes.clear();
+        dirtyLocalPositions.clear();
     }
 
     private void loadInitial(SubLevelBlock block) {
         Objects.requireNonNull(block, "block");
-        requireSectionLocal(block.localPos());
-        int index = index(block.localPos());
-        if (blocks[index] != null) {
+        requireLocal(block.localPos());
+        BlockPos localPos = block.localPos().immutable();
+        if (blocksByLocalPos.containsKey(localPos)) {
             throw new IllegalArgumentException("Duplicate sublevel block at local position " + describe(block.localPos()));
         }
-        blocks[index] = block;
-        blockCount++;
+        blocksByLocalPos.put(localPos, block);
     }
 
     private List<BlockPos> dirtyLocalPositions(int maxCount, boolean clear) {
-        List<BlockPos> result = new ArrayList<>(Math.min(maxCount, dirtyIndexes.cardinality()));
-        for (int index = dirtyIndexes.nextSetBit(0); index >= 0 && result.size() < maxCount; index = dirtyIndexes.nextSetBit(index + 1)) {
-            result.add(localPos(index));
-            if (clear) {
-                dirtyIndexes.clear(index);
+        List<BlockPos> result = new ArrayList<>(Math.min(maxCount, dirtyLocalPositions.size()));
+        for (BlockPos dirty : dirtyLocalPositions) {
+            if (result.size() >= maxCount) {
+                break;
+            }
+            result.add(dirty);
+        }
+        if (clear) {
+            for (BlockPos dirty : result) {
+                dirtyLocalPositions.remove(dirty);
             }
         }
         return List.copyOf(result);
     }
 
-    private static int index(BlockPos localPos) {
-        requireSectionLocal(localPos);
-        return (localPos.getY() << 8) | (localPos.getZ() << 4) | localPos.getX();
-    }
-
-    private static BlockPos localPos(int index) {
-        int x = index & 15;
-        int z = (index >> 4) & 15;
-        int y = (index >> 8) & 15;
-        return new BlockPos(x, y, z);
-    }
-
-    private static void requireSectionLocal(BlockPos localPos) {
+    private static void requireLocal(BlockPos localPos) {
         Objects.requireNonNull(localPos, "localPos");
-        if (!isSectionLocal(localPos)) {
-            throw new IllegalArgumentException("Sublevel local position must be inside one 16x16x16 section: " + describe(localPos));
+        if (!isValidLocal(localPos)) {
+            throw new IllegalArgumentException("Sublevel local position must be non-negative: " + describe(localPos));
         }
     }
 
-    public static boolean isSectionLocal(BlockPos localPos) {
+    public static boolean isValidLocal(BlockPos localPos) {
         Objects.requireNonNull(localPos, "localPos");
-        return localPos.getX() >= 0 && localPos.getX() < SECTION_SIZE
-                && localPos.getY() >= 0 && localPos.getY() < SECTION_SIZE
-                && localPos.getZ() >= 0 && localPos.getZ() < SECTION_SIZE;
+        return localPos.getX() >= 0 && localPos.getY() >= 0 && localPos.getZ() >= 0;
     }
 
     private static String describe(BlockPos pos) {

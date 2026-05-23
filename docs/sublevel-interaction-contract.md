@@ -13,9 +13,9 @@ boundary. Two requirements are now architectural constraints:
 ## Terms
 
 - Host level: the `ServerLevel` that owns the sublevel.
-- Sublevel section: a chunk-section-like block store using section-local
-  coordinates. M23 should start with one 16x16x16 section and leave multi-section
-  assemblies for later.
+- Sublevel plot: a reserved plot chunk/section block store using plot-local and
+  section-local coordinates. M23 starts with one 16x16x16 section and leaves
+  multi-section assemblies for later.
 - Sublevel root: the PhysX body/root transform that maps sublevel-local
   coordinates into host-world coordinates.
 - Player body: the PhysX actor bound to a Minecraft player UUID.
@@ -57,22 +57,27 @@ Vanilla behavior that depends on player movement, such as fall damage,
 knockback, step height, ladders, fluids, and network interpolation, must be
 reintroduced explicitly after the ownership rule is proven.
 
-## Sublevel As Chunk Section
+## Sublevel As Plot Chunk
 
-The sublevel storage model should expose chunk-section semantics before deeper
-mixins are added:
+The final sublevel storage model should be a plot chunk model. A sublevel is not
+just a rendered moving mesh; it is a reserved chunk/section-like block space in
+the host level with a PhysX root transform. The first implementation can remain
+small, but its identifiers and storage shape should be compatible with this
+target:
 
-- section-local block positions;
-- block state lookup and mutation;
+- reserved plot id and plot chunk coordinates;
+- chunk/section-local block positions;
+- chunk-like block state lookup and mutation;
 - collision shape queries in local coordinates;
-- dirty shape tracking;
+- dirty section and dirty shape tracking;
 - bounded block tick and neighbor update queues;
 - a local-to-world transform supplied by the sublevel root.
 
-The safe implementation path is to build a sublevel storage/query API first,
-then route selected Minecraft operations into it. Injecting a sublevel as a
-fully vanilla chunk should wait until the storage, tick order, and query bridge
-are stable.
+The safe implementation path is still staged: build the plot-compatible
+storage/query API first, then route selected Minecraft operations into it. The
+important constraint is that the staging path must converge on chunk cache,
+render section, lighting, raycast, and block interaction routing rather than a
+parallel non-Minecraft visual model.
 
 ## Interaction Boundary
 
@@ -101,6 +106,23 @@ M23 should avoid per-block entity ownership for normal sublevel content. The
 authoritative data is the section store plus dirty collider state. Debug visuals
 can remain optional and should keep their own synchronization budget.
 
+## Client Presentation Boundary
+
+The server-side sublevel store is not enough to match Sable-like behavior. A
+final sublevel must also have a client presentation layer that behaves like
+plot chunk content:
+
+- selected sublevel blocks need a transformed block outline;
+- rendered blocks need Minecraft-style model lighting instead of entity/display
+  lighting;
+- breaking overlays, particles, and later block entity rendering should target
+  plot-local positions;
+- `BlockDisplay` visuals are only a debug/prototype adapter.
+
+The implementation should first create a client plot mirror for sublevel block
+states, then add focused mixins for hit outline, render section integration,
+lighting, breaking overlay, and vanilla input routing.
+
 ## M23 Slices
 
 - M23.1: lock this interaction contract and update the milestone plan.
@@ -115,8 +137,13 @@ can remain optional and should keep their own synchronization budget.
   space.
 - M23.4.2: add command-gated sublevel-local block removal through the query
   bridge.
+- M23.4.3: document the Sable-like client presentation target: plot-chunk
+  routing, transformed selection outline, render sections, and Minecraft-style
+  lighting.
 - M23.4.x: route player use/place intents into sublevel-local coordinates for a
   small whitelist.
+- M24: implement the plot-chunk sublevel foundation before depending on vanilla
+  input mixins for normal gameplay.
 - M23.5: rebuild dirty sublevel colliders from section storage, still with
   conservative shape scope.
 - M23.6: add bounded cross-boundary event dispatch and diagnostics.

@@ -12,6 +12,8 @@ import net.minecraft.world.level.block.state.BlockState;
 public record SubLevelSnapshot(
         SubLevelId id,
         ResourceKey<Level> levelKey,
+        SubLevelLifecycleState state,
+        SubLevelPlot plot,
         MechanicsBodySnapshot body,
         SubLevelBounds bounds,
         List<SubLevelBlock> blocks,
@@ -21,6 +23,8 @@ public record SubLevelSnapshot(
     public SubLevelSnapshot {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(levelKey, "levelKey");
+        Objects.requireNonNull(state, "state");
+        Objects.requireNonNull(plot, "plot");
         Objects.requireNonNull(body, "body");
         Objects.requireNonNull(bounds, "bounds");
         blocks = List.copyOf(blocks);

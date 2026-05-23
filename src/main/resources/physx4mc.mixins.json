@@ -1,0 +1,23 @@
+{
+  "required": true,
+  "package": "com.firedoge.px4mc.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "minVersion": "0.8",
+  "client": [
+    "ClientChunkCacheMixin",
+    "ClientLevelMixin",
+    "GameRendererMixin",
+    "LevelRendererMixin",
+    "ParticleEngineMixin"
+  ],
+  "mixins": [
+    "BlockMixin",
+    "LevelChunkMixin",
+    "PlayerMixin",
+    "ServerChunkCacheMixin",
+    "ServerLevelMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

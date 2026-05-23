@@ -61,6 +61,20 @@ public final class PhysXNative {
             float mass
     );
 
+    static native long nativeCreateDynamicCompoundBoxBody(
+            long worldHandle,
+            double[] boxes,
+            int boxCount,
+            double positionX,
+            double positionY,
+            double positionZ,
+            double rotationX,
+            double rotationY,
+            double rotationZ,
+            double rotationW,
+            float mass
+    );
+
     static native boolean nativeGetBodyPose(long bodyHandle, double[] output);
 
     static native void nativeSetBodyPose(

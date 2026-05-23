@@ -374,6 +374,97 @@ std::uint64_t PhysXContext::create_dynamic_body(
 #endif
 }
 
+std::uint64_t PhysXContext::create_dynamic_compound_box_body(
+    WorldHandle world_handle,
+    const double* boxes,
+    int box_count,
+    double position_x,
+    double position_y,
+    double position_z,
+    double rotation_x,
+    double rotation_y,
+    double rotation_z,
+    double rotation_w,
+    float mass
+) {
+#if PX4MC_WITH_PHYSX
+    if (mass <= 0.0f || boxes == nullptr || box_count <= 0) {
+        return 0;
+    }
+    for (int i = 0; i < box_count; ++i) {
+        const int offset = i * 6;
+        const double half_x = boxes[offset + 3];
+        const double half_y = boxes[offset + 4];
+        const double half_z = boxes[offset + 5];
+        if (!std::isfinite(boxes[offset])
+            || !std::isfinite(boxes[offset + 1])
+            || !std::isfinite(boxes[offset + 2])
+            || !std::isfinite(half_x)
+            || !std::isfinite(half_y)
+            || !std::isfinite(half_z)
+            || half_x <= 0.0
+            || half_y <= 0.0
+            || half_z <= 0.0) {
+            return 0;
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto found = worlds_.find(world_handle);
+    if (found == worlds_.end() || found->second->scene == nullptr || found->second->material == nullptr) {
+        return 0;
+    }
+
+    physx::PxRigidDynamic* body = physics_->createRigidDynamic(make_transform(
+        position_x,
+        position_y,
+        position_z,
+        rotation_x,
+        rotation_y,
+        rotation_z,
+        rotation_w
+    ));
+    if (body == nullptr) {
+        return 0;
+    }
+
+    for (int i = 0; i < box_count; ++i) {
+        const int offset = i * 6;
+        physx::PxShape* shape = physics_->createShape(
+            physx::PxBoxGeometry(
+                static_cast<physx::PxReal>(boxes[offset + 3]),
+                static_cast<physx::PxReal>(boxes[offset + 4]),
+                static_cast<physx::PxReal>(boxes[offset + 5])
+            ),
+            *found->second->material
+        );
+        if (shape == nullptr) {
+            body->release();
+            return 0;
+        }
+
+        shape->setLocalPose(physx::PxTransform(physx::PxVec3(
+            static_cast<physx::PxReal>(boxes[offset]),
+            static_cast<physx::PxReal>(boxes[offset + 1]),
+            static_cast<physx::PxReal>(boxes[offset + 2])
+        )));
+        if (!body->attachShape(*shape)) {
+            shape->release();
+            body->release();
+            return 0;
+        }
+        shape->release();
+    }
+
+    body->setRigidBodyFlag(physx::PxRigidBodyFlag::eENABLE_CCD, true);
+    physx::PxRigidBodyExt::updateMassAndInertia(*body, mass);
+    found->second->scene->addActor(*body);
+    return to_handle(body);
+#else
+    return 0;
+#endif
+}
+
 bool PhysXContext::get_body_pose(std::uint64_t body_handle, double* output) {
 #if PX4MC_WITH_PHYSX
     physx::PxRigidActor* body = from_handle<physx::PxRigidActor>(body_handle);

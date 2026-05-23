@@ -92,6 +92,22 @@ JNIEXPORT jlong JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_native
     jfloat mass
 );
 
+JNIEXPORT jlong JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_nativeCreateDynamicCompoundBoxBody(
+    JNIEnv* env,
+    jclass type,
+    jlong world_handle,
+    jdoubleArray boxes,
+    jint box_count,
+    jdouble position_x,
+    jdouble position_y,
+    jdouble position_z,
+    jdouble rotation_x,
+    jdouble rotation_y,
+    jdouble rotation_z,
+    jdouble rotation_w,
+    jfloat mass
+);
+
 JNIEXPORT jboolean JNICALL Java_com_firedoge_px4mc_backend_physx_PhysXNative_nativeGetBodyPose(
     JNIEnv* env,
     jclass type,

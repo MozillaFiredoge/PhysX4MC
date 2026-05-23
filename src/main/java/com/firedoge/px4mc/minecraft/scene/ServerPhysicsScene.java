@@ -9,6 +9,7 @@ import java.util.Optional;
 
 import com.firedoge.px4mc.api.PhysicsBackend;
 import com.firedoge.px4mc.api.PhysicsBody;
+import com.firedoge.px4mc.api.PhysicsBoxCollider;
 import com.firedoge.px4mc.api.PhysicsPose;
 import com.firedoge.px4mc.api.PhysicsShape;
 import com.firedoge.px4mc.api.PhysicsVector;
@@ -74,6 +75,14 @@ public final class ServerPhysicsScene implements AutoCloseable {
             shape.close();
             throw exception;
         }
+    }
+
+    public PhysicsObject createDynamicCompoundBox(List<PhysicsBoxCollider> boxes, PhysicsPose pose, float mass) {
+        ensureOpen();
+        Objects.requireNonNull(boxes, "boxes");
+        Objects.requireNonNull(pose, "pose");
+        PhysicsBody body = world.createDynamicCompoundBoxBody(pose, boxes, mass);
+        return addObject(PhysicsObjectType.DYNAMIC_BOX, body, null);
     }
 
     public Optional<PhysicsObject> object(PhysicsObjectId id) {

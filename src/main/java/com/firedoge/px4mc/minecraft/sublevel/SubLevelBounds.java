@@ -48,4 +48,13 @@ public record SubLevelBounds(BlockPos sourceOrigin, BlockPos minSourcePos, Block
                 sourcePos.getZ() - sourceOrigin.getZ()
         );
     }
+
+    public BlockPos toLocalIn(SubLevelBounds parent) {
+        Objects.requireNonNull(parent, "parent");
+        return new BlockPos(
+                sourceOrigin.getX() - parent.sourceOrigin().getX(),
+                sourceOrigin.getY() - parent.sourceOrigin().getY(),
+                sourceOrigin.getZ() - parent.sourceOrigin().getZ()
+        );
+    }
 }

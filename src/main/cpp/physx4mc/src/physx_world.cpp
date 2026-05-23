@@ -81,6 +81,34 @@ std::uint64_t create_dynamic_body(
     );
 }
 
+std::uint64_t create_dynamic_compound_box_body(
+    WorldHandle world,
+    const double* boxes,
+    int box_count,
+    double position_x,
+    double position_y,
+    double position_z,
+    double rotation_x,
+    double rotation_y,
+    double rotation_z,
+    double rotation_w,
+    float mass
+) {
+    return context().create_dynamic_compound_box_body(
+        world,
+        boxes,
+        box_count,
+        position_x,
+        position_y,
+        position_z,
+        rotation_x,
+        rotation_y,
+        rotation_z,
+        rotation_w,
+        mass
+    );
+}
+
 bool get_body_pose(std::uint64_t body, double* output) {
     return PhysXContext::get_body_pose(body, output);
 }

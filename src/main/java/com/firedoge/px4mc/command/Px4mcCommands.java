@@ -281,14 +281,14 @@ public final class Px4mcCommands {
                                         context.getSource(),
                                         BlockPosArgument.getLoadedBlockPos(context, "pos"),
                                         1.0F,
-                                        true
+                                        false
                                 ))
                                 .then(Commands.argument("mass", FloatArgumentType.floatArg(0.01F, 10000.0F))
                                         .executes(context -> detachBlock(
                                                 context.getSource(),
                                                 BlockPosArgument.getLoadedBlockPos(context, "pos"),
                                                 FloatArgumentType.getFloat(context, "mass"),
-                                                true
+                                                false
                                         ))
                                         .then(Commands.argument("debugProxy", BoolArgumentType.bool())
                                                 .executes(context -> detachBlock(
@@ -305,7 +305,7 @@ public final class Px4mcCommands {
                                                 BlockPosArgument.getLoadedBlockPos(context, "from"),
                                                 BlockPosArgument.getLoadedBlockPos(context, "to"),
                                                 1.0F,
-                                                true
+                                                false
                                         ))
                                         .then(Commands.argument("mass", FloatArgumentType.floatArg(0.01F, 10000.0F))
                                                 .executes(context -> detachBlockBox(
@@ -313,7 +313,7 @@ public final class Px4mcCommands {
                                                         BlockPosArgument.getLoadedBlockPos(context, "from"),
                                                         BlockPosArgument.getLoadedBlockPos(context, "to"),
                                                         FloatArgumentType.getFloat(context, "mass"),
-                                                        true
+                                                        false
                                                 ))
                                                 .then(Commands.argument("debugProxy", BoolArgumentType.bool())
                                                         .executes(context -> detachBlockBox(
@@ -352,14 +352,14 @@ public final class Px4mcCommands {
                                         context.getSource(),
                                         BlockPosArgument.getLoadedBlockPos(context, "pos"),
                                         1.0F,
-                                        true
+                                        false
                                 ))
                                 .then(Commands.argument("mass", FloatArgumentType.floatArg(0.01F, 10000.0F))
                                         .executes(context -> assembleSubLevelBlock(
                                                 context.getSource(),
                                                 BlockPosArgument.getLoadedBlockPos(context, "pos"),
                                                 FloatArgumentType.getFloat(context, "mass"),
-                                                true
+                                                false
                                         ))
                                         .then(Commands.argument("debugProxy", BoolArgumentType.bool())
                                                 .executes(context -> assembleSubLevelBlock(
@@ -376,7 +376,7 @@ public final class Px4mcCommands {
                                                 BlockPosArgument.getLoadedBlockPos(context, "from"),
                                                 BlockPosArgument.getLoadedBlockPos(context, "to"),
                                                 1.0F,
-                                                true
+                                                false
                                         ))
                                         .then(Commands.argument("mass", FloatArgumentType.floatArg(0.01F, 10000.0F))
                                                 .executes(context -> assembleSubLevelBox(
@@ -384,7 +384,7 @@ public final class Px4mcCommands {
                                                         BlockPosArgument.getLoadedBlockPos(context, "from"),
                                                         BlockPosArgument.getLoadedBlockPos(context, "to"),
                                                         FloatArgumentType.getFloat(context, "mass"),
-                                                        true
+                                                        false
                                                 ))
                                                 .then(Commands.argument("debugProxy", BoolArgumentType.bool())
                                                         .executes(context -> assembleSubLevelBox(
@@ -783,6 +783,7 @@ public final class Px4mcCommands {
                             + " at " + describeBlockPos(subLevel.firstBlock().sourcePos())
                             + " into sublevel " + subLevel.id()
                             + "; body=" + subLevel.body().id()
+                            + "; plot=" + describeSubLevelPlot(subLevel)
                             + "; blocks=" + subLevel.blockCount()
                             + "; mass=" + String.format("%.2f", mass)
                             + "; debugProxy=" + debugProxy
@@ -804,6 +805,7 @@ public final class Px4mcCommands {
             source.sendSuccess(() -> Component.literal(
                     "Assembled sublevel " + subLevel.id()
                             + "; body=" + subLevel.body().id()
+                            + "; plot=" + describeSubLevelPlot(subLevel)
                             + "; block=" + blockName(subLevel)
                             + "; source=" + describeSubLevelBounds(subLevel)
                             + "; mass=" + String.format("%.2f", mass)
@@ -822,6 +824,7 @@ public final class Px4mcCommands {
             source.sendSuccess(() -> Component.literal(
                     "Assembled sublevel " + subLevel.id()
                             + "; body=" + subLevel.body().id()
+                            + "; plot=" + describeSubLevelPlot(subLevel)
                             + "; blocks=" + subLevel.blockCount()
                             + "; bounds=" + describeSubLevelBounds(subLevel)
                             + "; mass=" + String.format("%.2f", mass)
@@ -929,11 +932,26 @@ public final class Px4mcCommands {
         int dirtyBlockCount = snapshots.stream()
                 .mapToInt(SubLevelSnapshot::dirtyBlockCount)
                 .sum();
+        long plotCount = snapshots.stream()
+                .map(snapshot -> snapshot.plot().id())
+                .distinct()
+                .count();
+        SubLevelManager.BridgeStats bridgeStats = SubLevelManager.INSTANCE.bridgeStats();
         source.sendSuccess(() -> Component.literal(
                 "Sublevels=" + snapshots.size()
+                        + ", plots=" + plotCount
                         + ", blocks=" + blockCount
                         + ", dirtyBlocks=" + dirtyBlockCount
                         + ", visuals=" + visualCount
+                        + ", vanillaBreakActions=" + bridgeStats.vanillaBreakActions()
+                        + ", vanillaUseActions=" + bridgeStats.vanillaUseActions()
+                        + ", vanillaBreakAccepted=" + bridgeStats.vanillaBreakAccepted()
+                        + ", vanillaUseAccepted=" + bridgeStats.vanillaUseAccepted()
+                        + ", vanillaBreakRejected=" + bridgeStats.vanillaBreakRejected()
+                        + ", vanillaUseRejected=" + bridgeStats.vanillaUseRejected()
+                        + ", plotBlockWrites=" + bridgeStats.plotBlockWrites()
+                        + ", splitEvents=" + bridgeStats.splitEvents()
+                        + ", splitCreatedSublevels=" + bridgeStats.splitCreatedSubLevels()
         ), false);
         return snapshots.size();
     }
@@ -1296,7 +1314,9 @@ public final class Px4mcCommands {
         MechanicsBodySnapshot body = snapshot.body();
         return shortId(snapshot)
                 + " id=" + snapshot.id()
+                + " state=" + snapshot.state()
                 + " body=" + body.id()
+                + " plot=" + describeSubLevelPlot(snapshot)
                 + " block=" + blockName(snapshot)
                 + " blocks=" + snapshot.blockCount()
                 + " dirty=" + snapshot.dirtyBlockCount()
@@ -1320,6 +1340,10 @@ public final class Px4mcCommands {
                 + " distance=" + String.format("%.3f", result.distance());
     }
 
+    private static String describeSubLevelPlot(SubLevelSnapshot snapshot) {
+        return snapshot.plot().describe();
+    }
+
     private static String describeSubLevelBreak(SubLevelBreakResult result) {
         SubLevelPickResult pick = result.pick();
         return "SubLevelBreak id=" + pick.id()
@@ -1330,6 +1354,8 @@ public final class Px4mcCommands {
                 + " remainingBlocks=" + result.remainingBlocks()
                 + " dirtyBlocks=" + result.dirtyBlocks()
                 + " removedVisuals=" + result.removedVisuals()
+                + " connectedComponents=" + result.connectedComponents()
+                + " createdSublevels=" + result.createdSubLevels()
                 + " removedSublevel=" + result.removedSubLevel();
     }
 

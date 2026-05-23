@@ -14,6 +14,8 @@ public interface MechanicsWorld {
 
     MechanicsBodySnapshot createDynamicBox(MechanicsBoxDefinition definition);
 
+    MechanicsBodySnapshot createDynamicCompoundBox(MechanicsCompoundBoxDefinition definition);
+
     Optional<MechanicsBodySnapshot> snapshot(MechanicsBodyId id);
 
     List<MechanicsBodySnapshot> snapshots();

@@ -5,6 +5,7 @@ import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import com.firedoge.px4mc.api.PhysicsBody;
+import com.firedoge.px4mc.api.PhysicsBoxCollider;
 import com.firedoge.px4mc.api.PhysicsPose;
 import com.firedoge.px4mc.api.PhysicsShape;
 import com.firedoge.px4mc.api.PhysicsVector;
@@ -109,6 +110,51 @@ public final class PhysXWorld implements PhysicsWorld {
         };
         if (handle == 0L) {
             throw new IllegalStateException("PhysX failed to create a " + definition.type() + " body");
+        }
+        PhysXBody body = new PhysXBody(this, handle, pose);
+        bodies.add(body);
+        return body;
+    }
+
+    @Override
+    public PhysicsBody createDynamicCompoundBoxBody(PhysicsPose pose, List<PhysicsBoxCollider> boxes, float mass) {
+        ensureOpen();
+        Objects.requireNonNull(pose, "pose");
+        Objects.requireNonNull(boxes, "boxes");
+        if (boxes.isEmpty()) {
+            throw new IllegalArgumentException("Compound boxes must not be empty");
+        }
+        if (mass <= 0.0F) {
+            throw new IllegalArgumentException("Mass must be positive");
+        }
+
+        double[] packedBoxes = new double[boxes.size() * 6];
+        for (int i = 0; i < boxes.size(); i++) {
+            PhysicsBoxCollider box = Objects.requireNonNull(boxes.get(i), "box");
+            int offset = i * 6;
+            packedBoxes[offset] = box.center().x();
+            packedBoxes[offset + 1] = box.center().y();
+            packedBoxes[offset + 2] = box.center().z();
+            packedBoxes[offset + 3] = box.halfExtents().x();
+            packedBoxes[offset + 4] = box.halfExtents().y();
+            packedBoxes[offset + 5] = box.halfExtents().z();
+        }
+
+        long handle = PhysXNative.nativeCreateDynamicCompoundBoxBody(
+                nativeHandle,
+                packedBoxes,
+                boxes.size(),
+                pose.position().x(),
+                pose.position().y(),
+                pose.position().z(),
+                pose.rotation().x(),
+                pose.rotation().y(),
+                pose.rotation().z(),
+                pose.rotation().w(),
+                mass
+        );
+        if (handle == 0L) {
+            throw new IllegalStateException("PhysX failed to create a dynamic compound box body");
         }
         PhysXBody body = new PhysXBody(this, handle, pose);
         bodies.add(body);

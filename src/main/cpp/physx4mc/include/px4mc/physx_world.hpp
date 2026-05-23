@@ -12,6 +12,7 @@ std::uint64_t create_box_shape(WorldHandle world, float half_extent_x, float hal
 std::uint64_t create_static_plane(WorldHandle world, double normal_x, double normal_y, double normal_z, double distance);
 std::uint64_t create_static_body(WorldHandle world, std::uint64_t shape, double position_x, double position_y, double position_z, double rotation_x, double rotation_y, double rotation_z, double rotation_w);
 std::uint64_t create_dynamic_body(WorldHandle world, std::uint64_t shape, double position_x, double position_y, double position_z, double rotation_x, double rotation_y, double rotation_z, double rotation_w, float mass);
+std::uint64_t create_dynamic_compound_box_body(WorldHandle world, const double* boxes, int box_count, double position_x, double position_y, double position_z, double rotation_x, double rotation_y, double rotation_z, double rotation_w, float mass);
 bool get_body_pose(std::uint64_t body, double* output);
 void set_body_pose(std::uint64_t body, double position_x, double position_y, double position_z, double rotation_x, double rotation_y, double rotation_z, double rotation_w);
 void set_linear_velocity(std::uint64_t body, double velocity_x, double velocity_y, double velocity_z);

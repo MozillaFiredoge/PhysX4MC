@@ -6,13 +6,17 @@ import com.firedoge.px4mc.command.Px4mcCommands;
 import com.firedoge.px4mc.minecraft.player.PlayerPhysicsManager;
 import com.firedoge.px4mc.minecraft.player.PlayerProxyManager;
 import com.firedoge.px4mc.minecraft.scene.ServerPhysicsRuntime;
+import com.firedoge.px4mc.minecraft.sublevel.ServerSubLevelContainer;
+import com.firedoge.px4mc.minecraft.sublevel.SubLevelContainers;
 import com.firedoge.px4mc.minecraft.sublevel.SubLevelManager;
 import com.firedoge.px4mc.physics.PhysicsManager;
 
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.level.BlockEvent;
 import net.neoforged.neoforge.event.level.ChunkEvent;
 import net.neoforged.neoforge.event.server.ServerStartingEvent;
@@ -40,6 +44,30 @@ public final class NeoForgeEvents {
         ServerPhysicsRuntime.INSTANCE.tick(event.getServer());
         PlayerPhysicsManager.INSTANCE.tick(event.getServer());
         SubLevelManager.INSTANCE.tick(event.getServer());
+        for (ServerLevel level : event.getServer().getAllLevels()) {
+            SubLevelContainers.server(level).ifPresent(container -> container.trackingSystem().tick());
+        }
+    }
+
+    @SubscribeEvent
+    public void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player) {
+            sendExistingPlotChunks(player);
+        }
+    }
+
+    @SubscribeEvent
+    public void onPlayerChangedDimension(PlayerEvent.PlayerChangedDimensionEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player) {
+            sendExistingPlotChunks(player);
+        }
+    }
+
+    @SubscribeEvent
+    public void onPlayerRespawn(PlayerEvent.PlayerRespawnEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player) {
+            sendExistingPlotChunks(player);
+        }
     }
 
     @SubscribeEvent
@@ -94,5 +122,12 @@ public final class NeoForgeEvents {
     @SubscribeEvent
     public void onServerStopped(ServerStoppedEvent event) {
         ServerPhysicsRuntime.INSTANCE.close();
+    }
+
+    private static void sendExistingPlotChunks(ServerPlayer player) {
+        ServerSubLevelContainer container = SubLevelContainers.server(player.serverLevel()).orElse(null);
+        if (container != null) {
+            container.trackingSystem().resyncPlayer(player);
+        }
     }
 }
