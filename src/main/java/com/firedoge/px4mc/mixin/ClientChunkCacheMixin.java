@@ -109,19 +109,15 @@ public abstract class ClientChunkCacheMixin {
         }
 
         ChunkPos chunkPos = new ChunkPos(x, z);
-        LevelChunk chunk = container.plotChunk(chunkPos).orElse(null);
-        if (!isValidChunk(chunk, x, z)) {
-            if (chunk != null) {
-                chunk.setLoaded(false);
-                level.unload(chunk);
-            }
-            chunk = new LevelChunk(level, chunkPos);
-            chunk.replaceWithPacketData(buffer, heightmaps, blockEntityTagOutput);
-            container.putPlotChunk(chunkPos, chunk);
-        } else {
-            chunk.replaceWithPacketData(buffer, heightmaps, blockEntityTagOutput);
+        LevelChunk previous = container.plotChunk(chunkPos).orElse(null);
+        if (previous != null) {
+            previous.setLoaded(false);
+            level.unload(previous);
         }
 
+        LevelChunk chunk = new LevelChunk(level, chunkPos);
+        chunk.replaceWithPacketData(buffer, heightmaps, blockEntityTagOutput);
+        container.putPlotChunk(chunkPos, chunk);
         chunk.setLoaded(true);
         level.onChunkLoaded(chunkPos);
         level.getLightEngine().setLightEnabled(chunkPos, true);

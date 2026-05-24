@@ -12,7 +12,9 @@
   ],
   "mixins": [
     "BlockMixin",
+    "ChunkMapMixin",
     "LevelChunkMixin",
+    "LevelMixin",
     "PlayerMixin",
     "ServerChunkCacheMixin",
     "ServerLevelMixin"

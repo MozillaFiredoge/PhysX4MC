@@ -24,6 +24,7 @@ public final class PhysicsSubLevel {
     private final SubLevelSectionStorage section;
     private final List<VisualBinding> visuals = new ArrayList<>();
     private final Map<BlockPos, BlockEntity> blockEntitiesByLocalPos = new LinkedHashMap<>();
+    private boolean debugVisualsEnabled;
     private SubLevelLifecycleState state = SubLevelLifecycleState.CAPTURED;
 
     public PhysicsSubLevel(
@@ -127,6 +128,14 @@ public final class PhysicsSubLevel {
 
     public List<VisualBinding> visuals() {
         return visuals;
+    }
+
+    public boolean debugVisualsEnabled() {
+        return debugVisualsEnabled;
+    }
+
+    public void setDebugVisualsEnabled(boolean debugVisualsEnabled) {
+        this.debugVisualsEnabled = debugVisualsEnabled;
     }
 
     public Optional<BlockEntity> blockEntity(BlockPos localPos) {

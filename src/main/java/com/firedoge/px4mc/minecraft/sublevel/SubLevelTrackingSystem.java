@@ -27,6 +27,7 @@ import net.minecraft.network.protocol.game.ClientboundBundlePacket;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.chunk.LevelChunk;
 
 public final class SubLevelTrackingSystem {
@@ -37,6 +38,7 @@ public final class SubLevelTrackingSystem {
     private final ServerSubLevelContainer container;
     private final Map<SubLevelId, Set<UUID>> trackingPlayers = new LinkedHashMap<>();
     private final Map<SubLevelId, PhysicsPose> lastSentPoses = new LinkedHashMap<>();
+    private final Map<SubLevelId, Set<ChunkPos>> pendingChunkResyncs = new LinkedHashMap<>();
 
     SubLevelTrackingSystem(ServerSubLevelContainer container) {
         this.container = Objects.requireNonNull(container, "container");
@@ -53,8 +55,13 @@ public final class SubLevelTrackingSystem {
             sendTransformIfChanged(subLevel, pose);
         }
         for (PlotChunkHolder holder : container.plotChunkHolders()) {
+            PhysicsSubLevel subLevel = container.subLevelAtChunk(holder.chunk().getPos()).orElse(null);
+            if (subLevel != null && containsMovingPiston(subLevel, holder.chunk().getPos())) {
+                continue;
+            }
             holder.broadcastChanges(holder.chunk());
         }
+        sendPendingChunkResyncs();
     }
 
     public void resyncPlayer(ServerPlayer player) {
@@ -87,10 +94,12 @@ public final class SubLevelTrackingSystem {
     public void onSubLevelChunksRebuilt(PhysicsSubLevel subLevel, List<LevelChunk> chunks) {
         Objects.requireNonNull(subLevel, "subLevel");
         Objects.requireNonNull(chunks, "chunks");
-        for (ServerPlayer player : playersTracking(subLevel.id())) {
-            for (LevelChunk chunk : chunks) {
-                SubLevelChunkSender.sendChunk(player, chunk);
+        Set<ChunkPos> pending = pendingChunkResyncs.computeIfAbsent(subLevel.id(), ignored -> new LinkedHashSet<>());
+        for (LevelChunk chunk : chunks) {
+            if (containsMovingPiston(subLevel, chunk.getPos())) {
+                continue;
             }
+            pending.add(chunk.getPos());
         }
     }
 
@@ -99,6 +108,7 @@ public final class SubLevelTrackingSystem {
         Objects.requireNonNull(removedChunks, "removedChunks");
         Set<UUID> tracking = trackingPlayers.remove(subLevel.id());
         lastSentPoses.remove(subLevel.id());
+        pendingChunkResyncs.remove(subLevel.id());
         if (tracking == null || tracking.isEmpty()) {
             return;
         }
@@ -113,6 +123,7 @@ public final class SubLevelTrackingSystem {
     public void clear() {
         trackingPlayers.clear();
         lastSentPoses.clear();
+        pendingChunkResyncs.clear();
     }
 
     public List<ServerPlayer> playersTracking(ChunkPos chunkPos) {
@@ -208,11 +219,61 @@ public final class SubLevelTrackingSystem {
         }
     }
 
+    private void sendPendingChunkResyncs() {
+        if (pendingChunkResyncs.isEmpty()) {
+            return;
+        }
+
+        Map<SubLevelId, Set<ChunkPos>> pending = new LinkedHashMap<>(pendingChunkResyncs);
+        pendingChunkResyncs.clear();
+        for (Map.Entry<SubLevelId, Set<ChunkPos>> entry : pending.entrySet()) {
+            PhysicsSubLevel subLevel = container.subLevel(entry.getKey()).orElse(null);
+            if (subLevel == null) {
+                continue;
+            }
+            List<ServerPlayer> players = playersTracking(entry.getKey());
+            if (players.isEmpty()) {
+                continue;
+            }
+            List<Packet<? super ClientGamePacketListener>> packets = new ArrayList<>();
+            for (ChunkPos chunkPos : entry.getValue()) {
+                if (containsMovingPiston(subLevel, chunkPos)) {
+                    pendingChunkResyncs
+                            .computeIfAbsent(entry.getKey(), ignored -> new LinkedHashSet<>())
+                            .add(chunkPos);
+                    continue;
+                }
+                container.plotChunk(chunkPos)
+                        .map(chunk -> SubLevelChunkSender.chunkPacket(level(), chunk))
+                        .ifPresent(packets::add);
+            }
+            if (packets.isEmpty()) {
+                continue;
+            }
+            ClientboundBundlePacket bundle = new ClientboundBundlePacket(packets);
+            for (ServerPlayer player : players) {
+                if (player.connection != null) {
+                    player.connection.send(bundle);
+                }
+            }
+        }
+    }
+
     private Optional<PhysicsPose> pose(PhysicsSubLevel subLevel) {
         return PhysX4mc.api().existingWorld(level())
                 .flatMap(world -> world.snapshot(subLevel.bodyId()))
                 .filter(body -> !body.closed())
                 .map(MechanicsBodySnapshot::pose);
+    }
+
+    private static boolean containsMovingPiston(PhysicsSubLevel subLevel, ChunkPos chunkPos) {
+        for (SubLevelBlock block : subLevel.blocks()) {
+            if (block.blockState().is(Blocks.MOVING_PISTON)
+                    && new ChunkPos(subLevel.plot().toPlotBlockPos(block.localPos())).equals(chunkPos)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean shouldTrack(ServerPlayer player, PhysicsPose pose) {

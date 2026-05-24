@@ -1,20 +1,30 @@
 package com.firedoge.px4mc.mixin;
 
+import java.util.function.BooleanSupplier;
+
 import com.firedoge.px4mc.api.PhysicsVector;
 import com.firedoge.px4mc.minecraft.sublevel.ServerSubLevelContainer;
 import com.firedoge.px4mc.minecraft.sublevel.SubLevelContainerHolder;
 import com.firedoge.px4mc.minecraft.sublevel.SubLevelManager;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.Holder;
 import net.minecraft.core.particles.ParticleOptions;
+import net.minecraft.network.protocol.Packet;
+import net.minecraft.network.protocol.game.ClientboundBlockEventPacket;
 import net.minecraft.network.protocol.game.ClientboundLevelEventPacket;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.players.PlayerList;
 import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundSource;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameRules;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.gameevent.GameEvent;
 import net.minecraft.world.phys.Vec3;
 import org.spongepowered.asm.mixin.Mixin;
@@ -23,6 +33,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Constant;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.ModifyConstant;
+import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
@@ -33,10 +44,17 @@ public abstract class ServerLevelMixin implements SubLevelContainerHolder {
             new ServerSubLevelContainer((ServerLevel) (Object) this);
     @Unique
     private boolean px4mc$projectingSubLevelEffect;
+    @Unique
+    private boolean px4mc$projectingSubLevelEntity;
 
     @Override
     public ServerSubLevelContainer px4mc$subLevelContainer() {
         return px4mc$subLevelContainer;
+    }
+
+    @Inject(method = "tick(Ljava/util/function/BooleanSupplier;)V", at = @At("HEAD"))
+    private void px4mc$tickPlotBlockUpdatePrimes(BooleanSupplier hasTimeLeft, CallbackInfo ci) {
+        px4mc$subLevelContainer.tickPlotBlockUpdatePrimes();
     }
 
     @Inject(
@@ -214,15 +232,109 @@ public abstract class ServerLevelMixin implements SubLevelContainerHolder {
         ci.cancel();
     }
 
+    @Redirect(
+            method = "runBlockEvents",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lnet/minecraft/server/players/PlayerList;broadcast(Lnet/minecraft/world/entity/player/Player;DDDDLnet/minecraft/resources/ResourceKey;Lnet/minecraft/network/protocol/Packet;)V"
+            )
+    )
+    private void px4mc$broadcastPlotBlockEvent(
+            PlayerList playerList,
+            Player except,
+            double x,
+            double y,
+            double z,
+            double radius,
+            ResourceKey<Level> dimension,
+            Packet<?> packet
+    ) {
+        if (packet instanceof ClientboundBlockEventPacket blockEvent) {
+            PhysicsVector world = SubLevelManager.INSTANCE
+                    .plotPositionToWorld(px4mc$self(), Vec3.atCenterOf(blockEvent.getPos()))
+                    .orElse(null);
+            if (world != null) {
+                playerList.broadcast(except, world.x(), world.y(), world.z(), radius, dimension, packet);
+                return;
+            }
+        }
+        playerList.broadcast(except, x, y, z, radius, dimension, packet);
+    }
+
+    @Inject(method = "addFreshEntity", at = @At("HEAD"), cancellable = true)
+    private void px4mc$addPlotEntityAtWorldPosition(Entity entity, CallbackInfoReturnable<Boolean> cir) {
+        if (px4mc$projectingSubLevelEntity || entity.level() != px4mc$self()) {
+            return;
+        }
+        Vec3 plotPosition = entity.position();
+        SubLevelManager.PlotProjection projection = px4mc$entityPlotProjection(plotPosition);
+        if (projection == null) {
+            return;
+        }
+
+        PhysicsVector worldPosition = projection.toWorld(plotPosition);
+        PhysicsVector worldMovement = projection.directionToWorld(entity.getDeltaMovement());
+        entity.setPos(worldPosition.x(), worldPosition.y(), worldPosition.z());
+        entity.setDeltaMovement(worldMovement.x(), worldMovement.y(), worldMovement.z());
+
+        px4mc$projectingSubLevelEntity = true;
+        try {
+            cir.setReturnValue(px4mc$self().addFreshEntity(entity));
+        } finally {
+            px4mc$projectingSubLevelEntity = false;
+        }
+    }
+
     @ModifyConstant(method = "destroyBlockProgress", constant = @Constant(doubleValue = 1024.0D))
     private double px4mc$sendPlotDestroyProgressPastVanillaRange(double originalDistance) {
         return Double.MAX_VALUE;
+    }
+
+    @Inject(method = "shouldTickBlocksAt", at = @At("HEAD"), cancellable = true)
+    private void px4mc$shouldTickPlotBlocksAt(long chunkPos, CallbackInfoReturnable<Boolean> cir) {
+        if (px4mc$subLevelContainer.plotChunkHolder(new ChunkPos(chunkPos)).isPresent()) {
+            cir.setReturnValue(true);
+        }
+    }
+
+    @Inject(method = "isPositionTickingWithEntitiesLoaded", at = @At("HEAD"), cancellable = true)
+    private void px4mc$isPlotPositionTickingWithEntitiesLoaded(long chunkPos, CallbackInfoReturnable<Boolean> cir) {
+        if (px4mc$subLevelContainer.plotChunkHolder(new ChunkPos(chunkPos)).isPresent()) {
+            cir.setReturnValue(true);
+        }
+    }
+
+    @Inject(method = "isNaturalSpawningAllowed(Lnet/minecraft/world/level/ChunkPos;)Z", at = @At("HEAD"), cancellable = true)
+    private void px4mc$isNaturalSpawningAllowedInPlot(ChunkPos chunkPos, CallbackInfoReturnable<Boolean> cir) {
+        if (px4mc$subLevelContainer.plotChunkHolder(chunkPos).isPresent()) {
+            cir.setReturnValue(true);
+        }
     }
 
     @Unique
     private PhysicsVector px4mc$plotBlockWorldCenter(BlockPos pos) {
         return SubLevelManager.INSTANCE.plotPositionToWorld(px4mc$self(), Vec3.atCenterOf(pos))
                 .orElse(null);
+    }
+
+    @Unique
+    private SubLevelManager.PlotProjection px4mc$entityPlotProjection(Vec3 plotPosition) {
+        BlockPos origin = BlockPos.containing(plotPosition);
+        SubLevelManager.PlotProjection projection = SubLevelManager.INSTANCE
+                .plotProjection(px4mc$self(), origin)
+                .orElse(null);
+        if (projection != null) {
+            return projection;
+        }
+        for (Direction direction : Direction.values()) {
+            projection = SubLevelManager.INSTANCE
+                    .plotProjection(px4mc$self(), origin.relative(direction))
+                    .orElse(null);
+            if (projection != null) {
+                return projection;
+            }
+        }
+        return null;
     }
 
     @Unique

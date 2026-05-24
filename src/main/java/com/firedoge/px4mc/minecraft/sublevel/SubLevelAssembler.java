@@ -2,6 +2,7 @@ package com.firedoge.px4mc.minecraft.sublevel;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Comparator;
 import java.util.Objects;
 
 import com.firedoge.px4mc.PhysX4mc;
@@ -16,16 +17,24 @@ import com.firedoge.px4mc.minecraft.scene.ServerPhysicsRuntime;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.shapes.VoxelShape;
 
 final class SubLevelAssembler {
     private static final int BLOCK_UPDATE_FLAGS = 3;
+    private static final int CAPTURE_REMOVE_FLAGS = Block.UPDATE_CLIENTS
+            | Block.UPDATE_SUPPRESS_DROPS
+            | Block.UPDATE_KNOWN_SHAPE;
     private static final int MAX_ASSEMBLY_SCAN_VOLUME = 32768;
     private static final int MAX_ASSEMBLY_BLOCKS = 1024;
     private static final int MAX_ASSEMBLY_HORIZONTAL_SPAN = 64;
@@ -58,7 +67,10 @@ final class SubLevelAssembler {
         validateBounds(bounds);
         List<SubLevelBlock> blocks = collectBlocks(level, bounds);
         if (blocks.isEmpty()) {
-            throw new IllegalArgumentException("No detachable collision blocks in " + describeBounds(bounds));
+            throw new IllegalArgumentException("No detachable blocks in " + describeBounds(bounds));
+        }
+        if (!hasPhysicalCollision(blocks)) {
+            throw new IllegalArgumentException("Sublevel has no detachable physical collision blocks in " + describeBounds(bounds));
         }
 
         AggregateShape aggregate = aggregateShape(blocks);
@@ -67,8 +79,8 @@ final class SubLevelAssembler {
         List<SubLevelBlock> removedBlocks = new ArrayList<>(blocks.size());
         MechanicsBodySnapshot body = null;
         try {
-            for (SubLevelBlock block : blocks) {
-                if (!level.setBlock(block.sourcePos(), Blocks.AIR.defaultBlockState(), BLOCK_UPDATE_FLAGS)) {
+            for (SubLevelBlock block : captureRemovalOrder(blocks)) {
+                if (!level.setBlock(block.sourcePos(), Blocks.AIR.defaultBlockState(), CAPTURE_REMOVE_FLAGS)) {
                     throw new IllegalStateException("Failed to remove block at " + describePos(block.sourcePos()));
                 }
                 removedBlocks.add(block);
@@ -94,7 +106,8 @@ final class SubLevelAssembler {
             if (body != null) {
                 world.removeBody(body.id());
             }
-            for (SubLevelBlock block : removedBlocks) {
+            for (int i = removedBlocks.size() - 1; i >= 0; i--) {
+                SubLevelBlock block = removedBlocks.get(i);
                 level.setBlock(block.sourcePos(), block.blockState(), BLOCK_UPDATE_FLAGS);
             }
             refreshTerrainAround(level, removedBlocks);
@@ -113,21 +126,10 @@ final class SubLevelAssembler {
                     if (blockState.isAir()) {
                         continue;
                     }
-                    VoxelShape collisionShape = blockState.getCollisionShape(level, pos);
-                    if (collisionShape.isEmpty()) {
-                        continue;
-                    }
-                    List<AABB> localBoxes = collisionBoxes(collisionShape);
-                    if (localBoxes.isEmpty()) {
-                        continue;
-                    }
-                    AABB localBounds = aggregateBounds(localBoxes);
-                    PhysicsVector localHalfExtents = halfExtents(localBounds);
-                    if (!isPositive(localHalfExtents)) {
-                        continue;
-                    }
+                    List<AABB> localCollisionBoxes = physicalCollisionBoxes(blockState, level, pos);
+                    AABB localBounds = localGeometryBounds(blockState, level, pos);
                     if (blocks.size() >= MAX_ASSEMBLY_BLOCKS) {
-                        throw new IllegalArgumentException("Sublevels are limited to " + MAX_ASSEMBLY_BLOCKS + " collision blocks");
+                        throw new IllegalArgumentException("Sublevels are limited to " + MAX_ASSEMBLY_BLOCKS + " blocks");
                     }
                     BlockPos sourcePos = pos.immutable();
                     blocks.add(new SubLevelBlock(
@@ -135,7 +137,7 @@ final class SubLevelAssembler {
                             bounds.toLocal(sourcePos),
                             blockState,
                             localBounds,
-                            localBoxes,
+                            localCollisionBoxes,
                             PhysicsVector.ZERO,
                             blockEntityTag(level, sourcePos)
                     ));
@@ -145,9 +147,31 @@ final class SubLevelAssembler {
         return List.copyOf(blocks);
     }
 
+    private static List<SubLevelBlock> captureRemovalOrder(List<SubLevelBlock> blocks) {
+        return blocks.stream()
+                .sorted(Comparator
+                        .comparingInt(SubLevelAssembler::captureRemovalPriority).reversed()
+                        .thenComparing((SubLevelBlock block) -> block.sourcePos().getY(), Comparator.reverseOrder()))
+                .toList();
+    }
+
+    private static int captureRemovalPriority(SubLevelBlock block) {
+        BlockState state = block.blockState();
+        if (state.hasProperty(BlockStateProperties.DOUBLE_BLOCK_HALF)
+                && state.getValue(BlockStateProperties.DOUBLE_BLOCK_HALF) == DoubleBlockHalf.UPPER) {
+            return 2;
+        }
+        return block.blockState().getCollisionShape(EmptyBlockGetter.INSTANCE, block.sourcePos()).isEmpty() ? 1 : 0;
+    }
+
     private static CompoundTag blockEntityTag(ServerLevel level, BlockPos pos) {
         BlockEntity blockEntity = level.getBlockEntity(pos);
         return blockEntity == null ? null : blockEntity.saveWithFullMetadata(level.registryAccess());
+    }
+
+    static boolean hasPhysicalCollision(List<SubLevelBlock> blocks) {
+        Objects.requireNonNull(blocks, "blocks");
+        return blocks.stream().anyMatch(SubLevelBlock::hasPhysicalCollision);
     }
 
     static MechanicsCompoundBoxDefinition compoundDefinition(PhysicsPose pose, List<SubLevelBlock> blocks, float mass) {
@@ -260,6 +284,32 @@ final class SubLevelAssembler {
         return List.copyOf(boxes);
     }
 
+    static List<AABB> geometryBoxes(BlockState blockState, BlockGetter level, BlockPos pos) {
+        Objects.requireNonNull(blockState, "blockState");
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(pos, "pos");
+        List<AABB> collisionBoxes = collisionBoxes(blockState.getCollisionShape(level, pos));
+        if (!collisionBoxes.isEmpty()) {
+            return collisionBoxes;
+        }
+        return collisionBoxes(blockState.getShape(level, pos));
+    }
+
+    static List<AABB> physicalCollisionBoxes(BlockState blockState, BlockGetter level, BlockPos pos) {
+        Objects.requireNonNull(blockState, "blockState");
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(pos, "pos");
+        return collisionBoxes(blockState.getCollisionShape(level, pos));
+    }
+
+    static AABB localGeometryBounds(BlockState blockState, BlockGetter level, BlockPos pos) {
+        List<AABB> boxes = geometryBoxes(blockState, level, pos);
+        if (!boxes.isEmpty()) {
+            return aggregateBounds(boxes);
+        }
+        return unitBlockBounds();
+    }
+
     static AABB aggregateBounds(List<AABB> boxes) {
         Objects.requireNonNull(boxes, "boxes");
         if (boxes.isEmpty()) {
@@ -354,6 +404,10 @@ final class SubLevelAssembler {
         return new AABB(bounds.minX, bounds.minY, bounds.minZ, bounds.maxX, bounds.maxY, bounds.maxZ);
     }
 
+    private static AABB unitBlockBounds() {
+        return new AABB(0.0D, 0.0D, 0.0D, 1.0D, 1.0D, 1.0D);
+    }
+
     private static AggregateShape aggregateShape(List<SubLevelBlock> blocks) {
         double minX = Double.POSITIVE_INFINITY;
         double minY = Double.POSITIVE_INFINITY;
@@ -362,14 +416,21 @@ final class SubLevelAssembler {
         double maxY = Double.NEGATIVE_INFINITY;
         double maxZ = Double.NEGATIVE_INFINITY;
         for (SubLevelBlock block : blocks) {
+            if (!block.hasPhysicalCollision()) {
+                continue;
+            }
             BlockPos pos = block.sourcePos();
-            AABB bounds = block.localCollisionBounds();
-            minX = Math.min(minX, pos.getX() + bounds.minX);
-            minY = Math.min(minY, pos.getY() + bounds.minY);
-            minZ = Math.min(minZ, pos.getZ() + bounds.minZ);
-            maxX = Math.max(maxX, pos.getX() + bounds.maxX);
-            maxY = Math.max(maxY, pos.getY() + bounds.maxY);
-            maxZ = Math.max(maxZ, pos.getZ() + bounds.maxZ);
+            for (AABB bounds : block.localCollisionBoxes()) {
+                minX = Math.min(minX, pos.getX() + bounds.minX);
+                minY = Math.min(minY, pos.getY() + bounds.minY);
+                minZ = Math.min(minZ, pos.getZ() + bounds.minZ);
+                maxX = Math.max(maxX, pos.getX() + bounds.maxX);
+                maxY = Math.max(maxY, pos.getY() + bounds.maxY);
+                maxZ = Math.max(maxZ, pos.getZ() + bounds.maxZ);
+            }
+        }
+        if (!Double.isFinite(minX)) {
+            throw new IllegalArgumentException("Sublevel has no valid collision boxes");
         }
 
         PhysicsVector center = new PhysicsVector(

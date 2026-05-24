@@ -27,9 +27,6 @@ public record SubLevelBlock(
         Objects.requireNonNull(localCollisionBounds, "localCollisionBounds");
         Objects.requireNonNull(localCollisionBoxes, "localCollisionBoxes");
         Objects.requireNonNull(visualLocalOrigin, "visualLocalOrigin");
-        if (localCollisionBoxes.isEmpty()) {
-            throw new IllegalArgumentException("localCollisionBoxes must not be empty");
-        }
         localCollisionBoxes = localCollisionBoxes.stream()
                 .map(SubLevelBlock::copy)
                 .toList();
@@ -61,6 +58,10 @@ public record SubLevelBlock(
         return new SubLevelBlock(sourcePos, localPos, blockState, localCollisionBounds, localCollisionBoxes, visualLocalOrigin, blockEntityTag);
     }
 
+    public boolean hasPhysicalCollision() {
+        return !localCollisionBoxes.isEmpty();
+    }
+
     public List<AABB> bodyLocalCollisionBoxes() {
         return localCollisionBoxes.stream()
                 .map(bounds -> new AABB(
@@ -72,6 +73,17 @@ public record SubLevelBlock(
                         visualLocalOrigin.z() + bounds.maxZ
                 ))
                 .toList();
+    }
+
+    public AABB bodyLocalBounds() {
+        return new AABB(
+                visualLocalOrigin.x() + localCollisionBounds.minX,
+                visualLocalOrigin.y() + localCollisionBounds.minY,
+                visualLocalOrigin.z() + localCollisionBounds.minZ,
+                visualLocalOrigin.x() + localCollisionBounds.maxX,
+                visualLocalOrigin.y() + localCollisionBounds.maxY,
+                visualLocalOrigin.z() + localCollisionBounds.maxZ
+        );
     }
 
     private static AABB copy(AABB bounds) {

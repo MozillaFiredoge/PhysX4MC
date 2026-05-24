@@ -11,6 +11,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.DiodeBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
@@ -51,6 +52,7 @@ public abstract class LevelChunkMixin {
             cir.setReturnValue(null);
             return;
         }
+        px4mc$runLatePlotDiodePlaceHook(pos, previous, state, isMoving);
         cir.setReturnValue(previous);
     }
 
@@ -86,5 +88,17 @@ public abstract class LevelChunkMixin {
             return null;
         }
         return container;
+    }
+
+    @Unique
+    private void px4mc$runLatePlotDiodePlaceHook(BlockPos pos, BlockState previous, BlockState requested, boolean isMoving) {
+        if (level.captureBlockSnapshots || previous.equals(requested) || !(requested.getBlock() instanceof DiodeBlock)) {
+            return;
+        }
+
+        BlockState live = level.getBlockState(pos);
+        if (live.getBlock() == requested.getBlock()) {
+            live.onPlace(level, pos, previous, isMoving);
+        }
     }
 }

@@ -6,6 +6,7 @@ import com.firedoge.px4mc.command.Px4mcCommands;
 import com.firedoge.px4mc.minecraft.player.PlayerPhysicsManager;
 import com.firedoge.px4mc.minecraft.player.PlayerProxyManager;
 import com.firedoge.px4mc.minecraft.scene.ServerPhysicsRuntime;
+import com.firedoge.px4mc.minecraft.sublevel.SubLevelEntityBridge;
 import com.firedoge.px4mc.minecraft.sublevel.ServerSubLevelContainer;
 import com.firedoge.px4mc.minecraft.sublevel.SubLevelContainers;
 import com.firedoge.px4mc.minecraft.sublevel.SubLevelManager;
@@ -45,7 +46,10 @@ public final class NeoForgeEvents {
         PlayerPhysicsManager.INSTANCE.tick(event.getServer());
         SubLevelManager.INSTANCE.tick(event.getServer());
         for (ServerLevel level : event.getServer().getAllLevels()) {
-            SubLevelContainers.server(level).ifPresent(container -> container.trackingSystem().tick());
+            SubLevelContainers.server(level).ifPresent(container -> {
+                SubLevelEntityBridge.tickEntityInside(level, container);
+                container.trackingSystem().tick();
+            });
         }
     }
 

@@ -3,7 +3,6 @@ package com.firedoge.px4mc.minecraft.sublevel;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
-import java.util.List;
 import java.util.Optional;
 
 import org.joml.Quaternionf;
@@ -16,7 +15,6 @@ import com.firedoge.px4mc.api.PhysicsVector;
 import com.firedoge.px4mc.mechanics.MechanicsBodySnapshot;
 import com.mojang.math.Transformation;
 
-import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.DoubleTag;
 import net.minecraft.nbt.FloatTag;
@@ -28,8 +26,12 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Display;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.phys.AABB;
 
 final class SubLevelDebugVisuals {
+    private static final String VISUAL_NAME = "PhysX sublevel debug visual";
+    private static final String VISUAL_TAG = "px4mc_sublevel_visual";
+    private static final String SUBLEVEL_TAG_PREFIX = "px4mc_sublevel_";
     private static final MethodHandle DISPLAY_SET_TRANSFORMATION = findDisplaySetTransformation();
 
     private SubLevelDebugVisuals() {
@@ -37,7 +39,7 @@ final class SubLevelDebugVisuals {
 
     static void create(ServerLevel level, MechanicsBodySnapshot body, PhysicsSubLevel subLevel) {
         for (SubLevelBlock block : subLevel.blocks()) {
-            Display.BlockDisplay entity = createVisualEntity(level, body.pose(), block);
+            Display.BlockDisplay entity = createVisualEntity(level, body.pose(), subLevel, block);
             if (level.addFreshEntity(entity)) {
                 subLevel.visuals().add(new PhysicsSubLevel.VisualBinding(block, entity.getUUID()));
             }
@@ -58,39 +60,85 @@ final class SubLevelDebugVisuals {
     }
 
     static void discard(ServerLevel level, PhysicsSubLevel subLevel) {
+        discardBoundVisuals(level, subLevel);
+        subLevel.visuals().clear();
+    }
+
+    static void discard(ServerLevel level, MechanicsBodySnapshot body, PhysicsSubLevel subLevel) {
+        discardBoundVisuals(level, subLevel);
+        discardTaggedVisuals(level, body, subLevel);
+        subLevel.visuals().clear();
+    }
+
+    private static void discardBoundVisuals(ServerLevel level, PhysicsSubLevel subLevel) {
         for (PhysicsSubLevel.VisualBinding visual : subLevel.visuals()) {
             Entity entity = level.getEntity(visual.entityId());
             if (entity != null && !entity.isRemoved()) {
                 entity.discard();
             }
         }
-        subLevel.visuals().clear();
     }
 
-    static int discardBlock(ServerLevel level, PhysicsSubLevel subLevel, BlockPos localPos) {
-        int removed = 0;
-        for (PhysicsSubLevel.VisualBinding visual : List.copyOf(subLevel.visuals())) {
-            if (!visual.block().localPos().equals(localPos)) {
-                continue;
-            }
-            Entity entity = level.getEntity(visual.entityId());
-            if (entity != null && !entity.isRemoved()) {
+    private static void discardTaggedVisuals(ServerLevel level, MechanicsBodySnapshot body, PhysicsSubLevel subLevel) {
+        String subLevelTag = subLevelTag(subLevel);
+        for (Entity entity : level.getEntities((Entity) null, visualSearchBounds(body, subLevel), entity ->
+                entity instanceof Display.BlockDisplay
+                        && (isTaggedSubLevelVisual(entity, subLevelTag) || isLegacySubLevelVisual(entity)))) {
+            if (!entity.isRemoved()) {
                 entity.discard();
             }
-            subLevel.visuals().remove(visual);
-            removed++;
         }
-        return removed;
     }
 
-    private static Display.BlockDisplay createVisualEntity(ServerLevel level, PhysicsPose pose, SubLevelBlock block) {
+    private static Display.BlockDisplay createVisualEntity(ServerLevel level, PhysicsPose pose, PhysicsSubLevel subLevel, SubLevelBlock block) {
         Display.BlockDisplay entity = new Display.BlockDisplay(EntityType.BLOCK_DISPLAY, level);
         entity.setNoGravity(true);
         entity.setInvulnerable(true);
-        entity.setCustomName(Component.literal("PhysX sublevel debug visual"));
+        entity.setCustomName(Component.literal(VISUAL_NAME));
         entity.setCustomNameVisible(false);
         applyInitialVisualState(entity, pose, block);
+        tagVisualEntity(entity, subLevel);
         return entity;
+    }
+
+    private static void tagVisualEntity(Display.BlockDisplay entity, PhysicsSubLevel subLevel) {
+        entity.addTag(VISUAL_TAG);
+        entity.addTag(subLevelTag(subLevel));
+    }
+
+    private static String subLevelTag(PhysicsSubLevel subLevel) {
+        return SUBLEVEL_TAG_PREFIX + subLevel.id();
+    }
+
+    private static boolean isTaggedSubLevelVisual(Entity entity, String subLevelTag) {
+        return entity.getTags().contains(VISUAL_TAG) && entity.getTags().contains(subLevelTag);
+    }
+
+    private static boolean isLegacySubLevelVisual(Entity entity) {
+        Component name = entity.getCustomName();
+        return name != null && VISUAL_NAME.equals(name.getString());
+    }
+
+    private static AABB visualSearchBounds(MechanicsBodySnapshot body, PhysicsSubLevel subLevel) {
+        PhysicsVector position = body.pose().position();
+        double radius = 16.0D;
+        for (SubLevelBlock block : subLevel.blocks()) {
+            AABB bounds = block.bodyLocalBounds();
+            radius = Math.max(radius, distanceFromOrigin(bounds.minX, bounds.minY, bounds.minZ) + 4.0D);
+            radius = Math.max(radius, distanceFromOrigin(bounds.maxX, bounds.maxY, bounds.maxZ) + 4.0D);
+        }
+        return new AABB(
+                position.x() - radius,
+                position.y() - radius,
+                position.z() - radius,
+                position.x() + radius,
+                position.y() + radius,
+                position.z() + radius
+        );
+    }
+
+    private static double distanceFromOrigin(double x, double y, double z) {
+        return Math.sqrt(x * x + y * y + z * z);
     }
 
     private static void syncVisualEntity(Display.BlockDisplay entity, PhysicsPose pose, SubLevelBlock block) {
