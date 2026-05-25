@@ -174,6 +174,13 @@ public final class ClientSubLevelContainer implements SubLevelContainer {
         return id == null ? Optional.empty() : Optional.ofNullable(trackedSubLevels.get(id));
     }
 
+    public synchronized void markPlotBlockChanged(BlockPos plotPos) {
+        Objects.requireNonNull(plotPos, "plotPos");
+        trackedSubLevelForChunk(new ChunkPos(plotPos))
+                .filter(subLevel -> subLevel.plot().containsPlotBlockPos(plotPos))
+                .ifPresent(ClientTrackedSubLevel::invalidateCollisionGeometry);
+    }
+
     public synchronized Optional<RemovedClientSubLevelProjection> removedProjectionForChunk(ChunkPos chunkPos) {
         Objects.requireNonNull(chunkPos, "chunkPos");
         cleanupRemovedProjections();

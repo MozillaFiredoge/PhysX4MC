@@ -146,6 +146,20 @@ public final class PhysicsSubLevel {
         blockEntitiesByLocalPos.put(localPos.immutable(), Objects.requireNonNull(blockEntity, "blockEntity"));
     }
 
+    public void replaceBlockEntities(Map<BlockPos, BlockEntity> blockEntities) {
+        Objects.requireNonNull(blockEntities, "blockEntities");
+        for (Map.Entry<BlockPos, BlockEntity> entry : blockEntitiesByLocalPos.entrySet()) {
+            BlockEntity replacement = blockEntities.get(entry.getKey());
+            if (replacement != entry.getValue()) {
+                entry.getValue().setRemoved();
+            }
+        }
+        blockEntitiesByLocalPos.clear();
+        for (Map.Entry<BlockPos, BlockEntity> entry : blockEntities.entrySet()) {
+            blockEntitiesByLocalPos.put(entry.getKey().immutable(), Objects.requireNonNull(entry.getValue(), "blockEntity"));
+        }
+    }
+
     public void removeBlockEntity(BlockPos localPos) {
         BlockEntity blockEntity = blockEntitiesByLocalPos.remove(localPos);
         if (blockEntity != null) {

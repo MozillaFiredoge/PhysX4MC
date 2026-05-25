@@ -24,6 +24,8 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.Container;
+import net.minecraft.world.Containers;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
@@ -37,6 +39,8 @@ import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.shapes.Shapes;
+import net.minecraft.world.phys.shapes.VoxelShape;
 
 public final class SubLevelManager {
     public static final SubLevelManager INSTANCE = new SubLevelManager();
@@ -66,7 +70,6 @@ public final class SubLevelManager {
         PhysicsSubLevel subLevel = result.subLevel();
         container.add(subLevel);
         container.moveSourceScheduledTicksToPlot(subLevel);
-        container.primePlotBlockUpdates(subLevel);
         container.requestPlotBlockUpdatePrime(subLevel);
         subLevel.activate();
         try {
@@ -76,7 +79,7 @@ public final class SubLevelManager {
             return snapshot(result.body(), subLevel);
         } catch (RuntimeException exception) {
             discardVisuals(level, result.body(), subLevel);
-            subLevel.markRemoving();
+            prepareSubLevelRemoval(level, subLevel);
             container.remove(subLevel.id());
             PhysX4mc.api().existingWorld(level).ifPresent(world -> world.removeBody(subLevel.bodyId()));
             throw exception;
@@ -97,8 +100,7 @@ public final class SubLevelManager {
                         .flatMap(world -> world.snapshot(subLevel.bodyId()));
                 if (maybeBody.isEmpty()) {
                     discardVisuals(level, subLevel);
-                    subLevel.markRemoving();
-                    subLevel.clearBlockEntities();
+                    prepareSubLevelRemoval(level, subLevel);
                     container.remove(subLevel.id());
                     continue;
                 }
@@ -122,7 +124,7 @@ public final class SubLevelManager {
             Optional<MechanicsBodySnapshot> maybeBody = world.snapshot(subLevel.bodyId());
             if (maybeBody.isEmpty()) {
                 discardVisuals(level, subLevel);
-                subLevel.clearBlockEntities();
+                prepareSubLevelRemoval(level, subLevel);
                 container.remove(subLevel.id());
                 continue;
             }
@@ -145,7 +147,7 @@ public final class SubLevelManager {
                 .flatMap(world -> world.snapshot(subLevel.bodyId()));
         if (maybeBody.isEmpty()) {
             discardVisuals(level, subLevel);
-            subLevel.clearBlockEntities();
+            prepareSubLevelRemoval(level, subLevel);
             container.remove(id);
             return Optional.empty();
         }
@@ -194,6 +196,7 @@ public final class SubLevelManager {
             return Optional.empty();
         }
         subLevel.putBlockEntity(localPos, blockEntity);
+        subLevel.section().updateBlockEntityTag(localPos, blockEntity.saveWithFullMetadata(level.registryAccess()));
         SubLevelContainers.requireServer(level).rebuildPlotChunks(subLevel);
         return Optional.of(blockEntity);
     }
@@ -216,6 +219,7 @@ public final class SubLevelManager {
         blockEntity.setLevel(level);
         blockEntity.clearRemoved();
         subLevel.putBlockEntity(localPos, blockEntity);
+        subLevel.section().updateBlockEntityTag(localPos, blockEntity.saveWithFullMetadata(level.registryAccess()));
         SubLevelContainers.requireServer(level).rebuildPlotChunks(subLevel);
         return true;
     }
@@ -234,8 +238,30 @@ public final class SubLevelManager {
             return false;
         }
         subLevel.removeBlockEntity(localPos);
+        subLevel.section().updateBlockEntityTag(localPos, null);
         SubLevelContainers.requireServer(level).rebuildPlotChunks(subLevel);
         return true;
+    }
+
+    public boolean syncPlotBlockEntityTag(ServerLevel level, BlockPos plotPos) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(plotPos, "plotPos");
+        Optional<PhysicsSubLevel> maybeSubLevel = subLevelAtPlotBlock(level, plotPos);
+        if (maybeSubLevel.isEmpty()) {
+            return false;
+        }
+
+        PhysicsSubLevel subLevel = maybeSubLevel.get();
+        BlockPos localPos = subLevel.plot().toSectionLocalPos(plotPos);
+        if (subLevel.section().block(localPos).isEmpty()) {
+            return false;
+        }
+
+        BlockEntity blockEntity = level.getBlockEntity(plotPos);
+        CompoundTag tag = blockEntity == null || blockEntity.isRemoved()
+                ? null
+                : blockEntity.saveWithFullMetadata(level.registryAccess());
+        return subLevel.section().updateBlockEntityTag(localPos, tag);
     }
 
     public Optional<SubLevelPlotTarget> plotTargetAtBlock(ServerLevel level, BlockPos plotPos) {
@@ -301,18 +327,17 @@ public final class SubLevelManager {
 
         if (blockState.isAir()) {
             recordRemovedPlotProjection(level, subLevel, maybeBody.get(), plotPos);
-            RemovedBlocks removedBlocks = removeBlockAndDependents(level, subLevel, maybeBody.get(), localPos, true);
+            RemovedBlocks removedBlocks = removeBlockAndDependents(level, subLevel, maybeBody.get(), localPos, DropMode.CONTENTS, true);
             if (removedBlocks.isEmpty()) {
                 return false;
             }
             if (subLevel.section().isEmpty()) {
-                subLevel.markRemoving();
                 discardVisuals(level, maybeBody.get(), subLevel);
-                subLevel.clearBlockEntities();
+                prepareSubLevelRemoval(level, subLevel);
                 PhysX4mc.api().existingWorld(level).ifPresent(world -> world.removeBody(subLevel.bodyId()));
                 SubLevelContainers.requireServer(level).remove(subLevel.id());
             } else {
-                rebuildAfterBlockRemoval(level, SubLevelContainers.requireServer(level), subLevel, maybeBody.get());
+                rebuildAfterBlockRemoval(level, SubLevelContainers.requireServer(level), subLevel, maybeBody.get(), removedBlocks);
             }
             plotBlockWrites++;
             return true;
@@ -323,6 +348,44 @@ public final class SubLevelManager {
             return false;
         }
         AABB localCollisionBounds = SubLevelAssembler.localGeometryBounds(blockState, level, plotPos);
+        if (canUpdatePlotStateInPlace(previousBlock, blockState, localCollisionBounds, localCollisionBoxes)) {
+            SubLevelBlock updatedBlock = new SubLevelBlock(
+                    previousBlock.sourcePos(),
+                    localPos.immutable(),
+                    blockState,
+                    localCollisionBounds,
+                    localCollisionBoxes,
+                    previousBlock.visualLocalOrigin(),
+                    previousBlock.blockEntityTag()
+            );
+            subLevel.section().putBlock(updatedBlock);
+            subLevel.markDirty();
+            if (!SubLevelContainers.requireServer(level).setPlotChunkBlockStateInPlace(plotPos, blockState, false)) {
+                return false;
+            }
+            plotBlockWrites++;
+            return true;
+        }
+        if (previousBlock.blockState().getBlock() == blockState.getBlock()) {
+            SubLevelBlock updatedBlock = new SubLevelBlock(
+                    previousBlock.sourcePos(),
+                    localPos.immutable(),
+                    blockState,
+                    localCollisionBounds,
+                    localCollisionBoxes,
+                    previousBlock.visualLocalOrigin(),
+                    previousBlock.blockEntityTag()
+            );
+            subLevel.section().putBlock(updatedBlock);
+            subLevel.refreshBoundsFromBlocks();
+            subLevel.markDirty();
+            if (!SubLevelContainers.requireServer(level).setPlotChunkBlockStateInPlace(plotPos, blockState, false)) {
+                return false;
+            }
+            rebuildSubLevelBody(level, subLevel, maybeBody.get(), false);
+            plotBlockWrites++;
+            return true;
+        }
         if (previousBlock.blockState().getBlock() != blockState.getBlock()) {
             subLevel.removeBlockEntity(localPos);
         }
@@ -341,6 +404,38 @@ public final class SubLevelManager {
         rebuildSubLevelBody(level, subLevel, maybeBody.get());
         plotBlockWrites++;
         return true;
+    }
+
+    private static boolean canUpdatePlotStateInPlace(
+            SubLevelBlock previousBlock,
+            BlockState blockState,
+            AABB localCollisionBounds,
+            List<AABB> localCollisionBoxes
+    ) {
+        return previousBlock.blockState().getBlock() == blockState.getBlock()
+                && sameBox(previousBlock.localCollisionBounds(), localCollisionBounds)
+                && sameBoxes(previousBlock.localCollisionBoxes(), localCollisionBoxes);
+    }
+
+    private static boolean sameBoxes(List<AABB> first, List<AABB> second) {
+        if (first.size() != second.size()) {
+            return false;
+        }
+        for (int i = 0; i < first.size(); i++) {
+            if (!sameBox(first.get(i), second.get(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean sameBox(AABB first, AABB second) {
+        return Double.compare(first.minX, second.minX) == 0
+                && Double.compare(first.minY, second.minY) == 0
+                && Double.compare(first.minZ, second.minZ) == 0
+                && Double.compare(first.maxX, second.maxX) == 0
+                && Double.compare(first.maxY, second.maxY) == 0
+                && Double.compare(first.maxZ, second.maxZ) == 0;
     }
 
     private static boolean hasOtherPhysicalCollision(PhysicsSubLevel subLevel, BlockPos localPos) {
@@ -367,11 +462,12 @@ public final class SubLevelManager {
             PhysicsSubLevel subLevel,
             MechanicsBodySnapshot body,
             BlockPos primaryLocalPos,
+            DropMode primaryDropMode,
             boolean dropDependents
     ) {
         Map<BlockPos, SubLevelBlock> removed = new LinkedHashMap<>();
         ArrayDeque<BlockPos> queue = new ArrayDeque<>();
-        removeSubLevelBlock(level, subLevel, body, primaryLocalPos, false)
+        removeSubLevelBlock(level, subLevel, body, primaryLocalPos, primaryDropMode)
                 .ifPresent(block -> {
                     removed.put(primaryLocalPos.immutable(), block);
                     queue.add(primaryLocalPos.immutable());
@@ -394,7 +490,13 @@ public final class SubLevelManager {
                 if (!shouldRemoveDependentBlock(subLevel, candidate, removedLocalPos)) {
                     continue;
                 }
-                removeSubLevelBlock(level, subLevel, body, candidateLocalPos, dropDependents && shouldDropDependentBlock(candidate))
+                removeSubLevelBlock(
+                        level,
+                        subLevel,
+                        body,
+                        candidateLocalPos,
+                        dropDependents && shouldDropDependentBlock(candidate) ? DropMode.RESOURCES : DropMode.NONE
+                )
                         .ifPresent(block -> {
                             removed.put(candidateLocalPos.immutable(), block);
                             queue.add(candidateLocalPos.immutable());
@@ -410,7 +512,7 @@ public final class SubLevelManager {
             PhysicsSubLevel subLevel,
             MechanicsBodySnapshot body,
             BlockPos localPos,
-            boolean dropResources
+            DropMode dropMode
     ) {
         Optional<SubLevelBlock> maybeBlock = subLevel.section().block(localPos);
         if (maybeBlock.isEmpty()) {
@@ -420,14 +522,16 @@ public final class SubLevelManager {
         BlockPos plotPos = subLevel.plot().toPlotBlockPos(localPos);
         recordRemovedPlotProjection(level, subLevel, body, plotPos);
         SubLevelBlock block = maybeBlock.get();
-        if (dropResources) {
-            dropDependentResources(level, subLevel, localPos, block, plotPos);
+        if (dropMode == DropMode.RESOURCES) {
+            dropResources(level, subLevel, localPos, block, plotPos);
+        } else if (dropMode == DropMode.CONTENTS) {
+            dropContainerContents(level, subLevel, localPos, block, plotPos);
         }
         subLevel.removeBlockEntity(localPos);
         return subLevel.section().removeBlock(localPos);
     }
 
-    private void dropDependentResources(
+    private void dropResources(
             ServerLevel level,
             PhysicsSubLevel subLevel,
             BlockPos localPos,
@@ -436,6 +540,27 @@ public final class SubLevelManager {
     ) {
         BlockEntity blockEntity = subLevel.blockEntity(localPos).filter(entity -> !entity.isRemoved()).orElse(null);
         Block.dropResources(block.blockState(), level, plotPos, blockEntity, null, ItemStack.EMPTY);
+        dropContainerContents(level, subLevel, localPos, block, plotPos);
+    }
+
+    private void dropContainerContents(
+            ServerLevel level,
+            PhysicsSubLevel subLevel,
+            BlockPos localPos,
+            SubLevelBlock block,
+            BlockPos plotPos
+    ) {
+        BlockEntity blockEntity = subLevel.blockEntity(localPos)
+                .filter(entity -> !entity.isRemoved())
+                .orElseGet(() -> createBlockEntity(level, plotPos, block));
+        if (!(blockEntity instanceof Container container) || container.isEmpty()) {
+            return;
+        }
+
+        Containers.dropContents(level, plotPos, container);
+        container.clearContent();
+        container.setChanged();
+        level.updateNeighbourForOutputSignal(plotPos, block.blockState().getBlock());
     }
 
     private static List<BlockPos> dependentCandidatePositions(BlockPos localPos) {
@@ -662,6 +787,42 @@ public final class SubLevelManager {
         return new AABB(plotPos).distanceToSqr(plotEye) < maxDistance * maxDistance;
     }
 
+    public List<VoxelShape> blockCollisionShapes(ServerLevel level, AABB worldBounds) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(worldBounds, "worldBounds");
+        ServerSubLevelContainer container = SubLevelContainers.server(level).orElse(null);
+        if (container == null || container.isEmpty()) {
+            return List.of();
+        }
+
+        MechanicsWorld world = PhysX4mc.api().existingWorld(level).orElse(null);
+        if (world == null) {
+            return List.of();
+        }
+
+        AABB queryBounds = worldBounds.inflate(1.0E-7D);
+        List<VoxelShape> shapes = new ArrayList<>();
+        for (PhysicsSubLevel subLevel : container.subLevels()) {
+            if (subLevel.state() == SubLevelLifecycleState.REMOVING) {
+                continue;
+            }
+            MechanicsBodySnapshot body = world.snapshot(subLevel.bodyId()).orElse(null);
+            if (body == null) {
+                continue;
+            }
+            SubLevelTransform transform = SubLevelTransform.from(body);
+            for (SubLevelBlock block : subLevel.blocks()) {
+                for (AABB localBox : block.bodyLocalCollisionBoxes()) {
+                    AABB worldBox = bodyLocalBoxToWorldBounds(transform, localBox);
+                    if (worldBox.intersects(queryBounds)) {
+                        shapes.add(Shapes.create(worldBox));
+                    }
+                }
+            }
+        }
+        return List.copyOf(shapes);
+    }
+
     public Optional<SubLevelPickResult> pickBlock(
             ServerLevel level,
             PhysicsVector worldOrigin,
@@ -760,7 +921,7 @@ public final class SubLevelManager {
         PhysicsSubLevel subLevel = maybeSubLevel.get();
 
         recordRemovedPlotProjection(level, subLevel, pick.body(), subLevel.plot().toPlotBlockPos(pick.localPos()));
-        RemovedBlocks removedBlocks = removeBlockAndDependents(level, subLevel, pick.body(), pick.localPos(), true);
+        RemovedBlocks removedBlocks = removeBlockAndDependents(level, subLevel, pick.body(), pick.localPos(), DropMode.RESOURCES, true);
         if (removedBlocks.isEmpty()) {
             return Optional.empty();
         }
@@ -769,14 +930,13 @@ public final class SubLevelManager {
         boolean removedSubLevel = false;
         SplitResult splitResult = SplitResult.notSplit(subLevel.section().blockCount());
         if (subLevel.section().isEmpty()) {
-            subLevel.markRemoving();
             discardVisuals(level, pick.body(), subLevel);
-            subLevel.clearBlockEntities();
+            prepareSubLevelRemoval(level, subLevel);
             PhysX4mc.api().existingWorld(level).ifPresent(world -> world.removeBody(subLevel.bodyId()));
             container.remove(subLevel.id());
             removedSubLevel = true;
         } else {
-            splitResult = rebuildAfterBlockRemoval(level, container, subLevel, pick.body());
+            splitResult = rebuildAfterBlockRemoval(level, container, subLevel, pick.body(), removedBlocks);
             removedSubLevel = splitResult.removedOriginal();
         }
 
@@ -832,7 +992,7 @@ public final class SubLevelManager {
                 0.0D
         );
         recordRemovedPlotProjection(level, subLevel, maybeBody.get(), plotPos);
-        RemovedBlocks removedBlocks = removeBlockAndDependents(level, subLevel, maybeBody.get(), localPos, true);
+        RemovedBlocks removedBlocks = removeBlockAndDependents(level, subLevel, maybeBody.get(), localPos, DropMode.RESOURCES, true);
         if (removedBlocks.isEmpty()) {
             return Optional.empty();
         }
@@ -841,14 +1001,13 @@ public final class SubLevelManager {
         boolean removedSubLevel = false;
         SplitResult splitResult = SplitResult.notSplit(subLevel.section().blockCount());
         if (subLevel.section().isEmpty()) {
-            subLevel.markRemoving();
             discardVisuals(level, maybeBody.get(), subLevel);
-            subLevel.clearBlockEntities();
+            prepareSubLevelRemoval(level, subLevel);
             PhysX4mc.api().existingWorld(level).ifPresent(world -> world.removeBody(subLevel.bodyId()));
             SubLevelContainers.requireServer(level).remove(subLevel.id());
             removedSubLevel = true;
         } else {
-            splitResult = rebuildAfterBlockRemoval(level, SubLevelContainers.requireServer(level), subLevel, maybeBody.get());
+            splitResult = rebuildAfterBlockRemoval(level, SubLevelContainers.requireServer(level), subLevel, maybeBody.get(), removedBlocks);
             removedSubLevel = splitResult.removedOriginal();
         }
 
@@ -878,8 +1037,7 @@ public final class SubLevelManager {
         Optional<MechanicsBodySnapshot> maybeBody = maybeWorld.flatMap(world -> world.snapshot(subLevel.bodyId()));
         if (maybeBody.isEmpty()) {
             discardVisuals(level, subLevel);
-            subLevel.markRemoving();
-            subLevel.clearBlockEntities();
+            prepareSubLevelRemoval(level, subLevel);
             container.remove(id);
             return Optional.empty();
         }
@@ -890,17 +1048,21 @@ public final class SubLevelManager {
                 throw new IllegalStateException("Cannot restore " + id + "; source position " + describePos(block.sourcePos()) + " is occupied");
             }
         }
+        Map<BlockPos, CompoundTag> blockEntityTags = snapshotBlockEntityTagsBySource(level, subLevel);
         for (SubLevelBlock block : subLevel.blocks()) {
             if (!level.setBlock(block.sourcePos(), block.blockState(), BLOCK_UPDATE_FLAGS)) {
                 throw new IllegalStateException("Failed to restore block at " + describePos(block.sourcePos()));
+            }
+            CompoundTag blockEntityTag = blockEntityTags.get(block.sourcePos());
+            if (blockEntityTag != null) {
+                restoreSourceBlockEntity(level, block, blockEntityTag);
             }
         }
         container.movePlotScheduledTicksToSource(subLevel);
         SubLevelAssembler.refreshTerrainAround(level, subLevel.blocks());
 
         discardVisuals(level, maybeBody.get(), subLevel);
-        subLevel.markRemoving();
-        subLevel.clearBlockEntities();
+        prepareSubLevelRemoval(level, subLevel);
         maybeWorld.ifPresent(world -> world.removeBody(subLevel.bodyId()));
         container.remove(id);
         SubLevelSnapshot snapshot = snapshot(maybeBody.get(), subLevel);
@@ -923,8 +1085,7 @@ public final class SubLevelManager {
                 body -> discardVisuals(level, body, subLevel),
                 () -> discardVisuals(level, subLevel)
         );
-        subLevel.markRemoving();
-        subLevel.clearBlockEntities();
+        prepareSubLevelRemoval(level, subLevel);
         maybeWorld.ifPresent(world -> world.removeBody(subLevel.bodyId()));
         container.remove(id);
         Optional<SubLevelSnapshot> snapshot = maybeBody.map(body -> snapshot(body, subLevel));
@@ -937,8 +1098,7 @@ public final class SubLevelManager {
         int removed = 0;
         for (PhysicsSubLevel subLevel : container.subLevels()) {
             discardVisuals(level, subLevel);
-            subLevel.markRemoving();
-            subLevel.clearBlockEntities();
+            prepareSubLevelRemoval(level, subLevel);
             container.remove(subLevel.id());
             removed++;
         }
@@ -954,11 +1114,17 @@ public final class SubLevelManager {
             }
             for (PhysicsSubLevel subLevel : container.subLevels()) {
                 discardVisuals(level, subLevel);
-                subLevel.markRemoving();
-                subLevel.clearBlockEntities();
+                prepareSubLevelRemoval(level, subLevel);
             }
             container.clear();
+            SubLevelEntityBridge.discardAttachedEntities(level);
         }
+    }
+
+    private void prepareSubLevelRemoval(ServerLevel level, PhysicsSubLevel subLevel) {
+        subLevel.markRemoving();
+        SubLevelEntityBridge.discardAttachedEntities(level, subLevel);
+        subLevel.clearBlockEntities();
     }
 
     private void createVisuals(ServerLevel level, MechanicsBodySnapshot body, PhysicsSubLevel subLevel) {
@@ -1008,12 +1174,21 @@ public final class SubLevelManager {
         ServerSubLevelContainer container = SubLevelContainers.requireServer(level);
         for (PhysicsSubLevel subLevel : container.subLevels()) {
             discardVisuals(level, subLevel);
-            subLevel.clearBlockEntities();
+            prepareSubLevelRemoval(level, subLevel);
             container.remove(subLevel.id());
         }
     }
 
     private void rebuildSubLevelBody(ServerLevel level, PhysicsSubLevel subLevel, MechanicsBodySnapshot previousBody) {
+        rebuildSubLevelBody(level, subLevel, previousBody, true);
+    }
+
+    private void rebuildSubLevelBody(
+            ServerLevel level,
+            PhysicsSubLevel subLevel,
+            MechanicsBodySnapshot previousBody,
+            boolean rebuildPlotChunks
+    ) {
         Objects.requireNonNull(level, "level");
         Objects.requireNonNull(subLevel, "subLevel");
         Objects.requireNonNull(previousBody, "previousBody");
@@ -1033,7 +1208,9 @@ public final class SubLevelManager {
                     previousBody.mass()
             ));
             world.setLinearVelocity(replacement.id(), previousBody.linearVelocity());
-            SubLevelContainers.requireServer(level).rebuildPlotChunks(subLevel);
+            if (rebuildPlotChunks) {
+                SubLevelContainers.requireServer(level).rebuildPlotChunks(subLevel);
+            }
         } catch (RuntimeException exception) {
             if (replacement != null) {
                 world.removeBody(replacement.id());
@@ -1057,19 +1234,20 @@ public final class SubLevelManager {
             ServerLevel level,
             ServerSubLevelContainer container,
             PhysicsSubLevel subLevel,
-            MechanicsBodySnapshot previousBody
+            MechanicsBodySnapshot previousBody,
+            RemovedBlocks removedBlocks
     ) {
         Objects.requireNonNull(level, "level");
         Objects.requireNonNull(container, "container");
         Objects.requireNonNull(subLevel, "subLevel");
         Objects.requireNonNull(previousBody, "previousBody");
+        Objects.requireNonNull(removedBlocks, "removedBlocks");
         if (subLevel.section().isEmpty()) {
             return SplitResult.notSplit(0);
         }
         if (!SubLevelAssembler.hasPhysicalCollision(subLevel.blocks())) {
-            subLevel.markRemoving();
             discardVisuals(level, previousBody, subLevel);
-            subLevel.clearBlockEntities();
+            prepareSubLevelRemoval(level, subLevel);
             PhysX4mc.api().existingWorld(level).ifPresent(world -> world.removeBody(subLevel.bodyId()));
             container.remove(subLevel.id());
             return new SplitResult(true, 0, 0);
@@ -1079,7 +1257,8 @@ public final class SubLevelManager {
         if (components.size() <= 1) {
             subLevel.refreshBoundsFromBlocks();
             subLevel.markDirty();
-            rebuildSubLevelBody(level, subLevel, previousBody);
+            boolean syncedInPlace = syncRemovedPlotBlocksInPlace(level, container, subLevel, removedBlocks);
+            rebuildSubLevelBody(level, subLevel, previousBody, !syncedInPlace);
             return SplitResult.notSplit(1);
         }
 
@@ -1089,7 +1268,8 @@ public final class SubLevelManager {
         if (physicalComponents.size() <= 1) {
             subLevel.refreshBoundsFromBlocks();
             subLevel.markDirty();
-            rebuildSubLevelBody(level, subLevel, previousBody);
+            boolean syncedInPlace = syncRemovedPlotBlocksInPlace(level, container, subLevel, removedBlocks);
+            rebuildSubLevelBody(level, subLevel, previousBody, !syncedInPlace);
             return SplitResult.notSplit(1);
         }
 
@@ -1097,6 +1277,32 @@ public final class SubLevelManager {
         splitEvents++;
         splitCreatedSubLevels += created;
         return new SplitResult(true, physicalComponents.size(), created);
+    }
+
+    private static boolean syncRemovedPlotBlocksInPlace(
+            ServerLevel level,
+            ServerSubLevelContainer container,
+            PhysicsSubLevel subLevel,
+            RemovedBlocks removedBlocks
+    ) {
+        if (removedBlocks.isEmpty()) {
+            return true;
+        }
+
+        boolean synced = true;
+        BlockState air = Blocks.AIR.defaultBlockState();
+        for (Map.Entry<BlockPos, SubLevelBlock> entry : removedBlocks.blocksByLocalPos().entrySet()) {
+            BlockPos plotPos = subLevel.plot().toPlotBlockPos(entry.getKey());
+            SubLevelBlock block = entry.getValue();
+            boolean blockSynced = container.setPlotChunkBlockStateInPlace(plotPos, air, false);
+            container.removePlotChunkBlockEntityInPlace(plotPos);
+            if (blockSynced) {
+                level.sendBlockUpdated(plotPos, block.blockState(), air, BLOCK_UPDATE_FLAGS);
+            } else {
+                synced = false;
+            }
+        }
+        return synced;
     }
 
     private int splitSubLevel(
@@ -1138,17 +1344,15 @@ public final class SubLevelManager {
         } catch (RuntimeException exception) {
             for (SplitSubLevel split : created) {
                 discardVisuals(level, split.body(), split.subLevel());
-                split.subLevel().markRemoving();
-                split.subLevel().clearBlockEntities();
+                prepareSubLevelRemoval(level, split.subLevel());
                 container.remove(split.subLevel().id());
                 world.removeBody(split.body().id());
             }
             throw exception;
         }
 
-        subLevel.markRemoving();
         discardVisuals(level, previousBody, subLevel);
-        subLevel.clearBlockEntities();
+        prepareSubLevelRemoval(level, subLevel);
         world.removeBody(subLevel.bodyId());
         container.remove(subLevel.id());
         return created.size();
@@ -1258,12 +1462,51 @@ public final class SubLevelManager {
     }
 
     private static CompoundTag splitBlockEntityTag(ServerLevel level, PhysicsSubLevel subLevel, SubLevelBlock block) {
-        BlockPos oldPlotPos = subLevel.plot().toPlotBlockPos(block.localPos());
-        BlockEntity blockEntity = level.getBlockEntity(oldPlotPos);
+        return currentBlockEntityTag(level, subLevel, block);
+    }
+
+    private static Map<BlockPos, CompoundTag> snapshotBlockEntityTagsBySource(ServerLevel level, PhysicsSubLevel subLevel) {
+        Map<BlockPos, CompoundTag> tagsBySource = new LinkedHashMap<>();
+        for (SubLevelBlock block : subLevel.blocks()) {
+            CompoundTag tag = currentBlockEntityTag(level, subLevel, block);
+            if (tag != null) {
+                tagsBySource.put(block.sourcePos(), tag);
+            }
+        }
+        return Map.copyOf(tagsBySource);
+    }
+
+    private static CompoundTag currentBlockEntityTag(ServerLevel level, PhysicsSubLevel subLevel, SubLevelBlock block) {
+        BlockPos plotPos = subLevel.plot().toPlotBlockPos(block.localPos());
+        BlockEntity blockEntity = level.getBlockEntity(plotPos);
         if (blockEntity != null && !blockEntity.isRemoved()) {
             return blockEntity.saveWithFullMetadata(level.registryAccess());
         }
+        Optional<BlockEntity> cached = subLevel.blockEntity(block.localPos()).filter(entity -> !entity.isRemoved());
+        if (cached.isPresent()) {
+            return cached.get().saveWithFullMetadata(level.registryAccess());
+        }
         return block.blockEntityTag();
+    }
+
+    private static void restoreSourceBlockEntity(ServerLevel level, SubLevelBlock block, CompoundTag tag) {
+        if (!block.blockState().hasBlockEntity()) {
+            return;
+        }
+
+        CompoundTag sourceTag = tag.copy();
+        sourceTag.putInt("x", block.sourcePos().getX());
+        sourceTag.putInt("y", block.sourcePos().getY());
+        sourceTag.putInt("z", block.sourcePos().getZ());
+        BlockEntity blockEntity = BlockEntity.loadStatic(block.sourcePos(), block.blockState(), sourceTag, level.registryAccess());
+        if (blockEntity == null) {
+            return;
+        }
+
+        blockEntity.setLevel(level);
+        blockEntity.clearRemoved();
+        level.setBlockEntity(blockEntity);
+        blockEntity.setChanged();
     }
 
     private static float splitMass(float previousMass, int componentBlocks, int totalBlocks) {
@@ -1271,6 +1514,32 @@ public final class SubLevelManager {
             return previousMass;
         }
         return Math.max(0.001F, previousMass * ((float) componentBlocks / (float) totalBlocks));
+    }
+
+    private static AABB bodyLocalBoxToWorldBounds(SubLevelTransform transform, AABB localBox) {
+        double minX = Double.POSITIVE_INFINITY;
+        double minY = Double.POSITIVE_INFINITY;
+        double minZ = Double.POSITIVE_INFINITY;
+        double maxX = Double.NEGATIVE_INFINITY;
+        double maxY = Double.NEGATIVE_INFINITY;
+        double maxZ = Double.NEGATIVE_INFINITY;
+        for (int xIndex = 0; xIndex < 2; xIndex++) {
+            double x = xIndex == 0 ? localBox.minX : localBox.maxX;
+            for (int yIndex = 0; yIndex < 2; yIndex++) {
+                double y = yIndex == 0 ? localBox.minY : localBox.maxY;
+                for (int zIndex = 0; zIndex < 2; zIndex++) {
+                    double z = zIndex == 0 ? localBox.minZ : localBox.maxZ;
+                    PhysicsVector world = transform.localToWorld(new PhysicsVector(x, y, z));
+                    minX = Math.min(minX, world.x());
+                    minY = Math.min(minY, world.y());
+                    minZ = Math.min(minZ, world.z());
+                    maxX = Math.max(maxX, world.x());
+                    maxY = Math.max(maxY, world.y());
+                    maxZ = Math.max(maxZ, world.z());
+                }
+            }
+        }
+        return new AABB(minX, minY, minZ, maxX, maxY, maxZ);
     }
 
     private void recordRemovedPlotProjection(
@@ -1471,6 +1740,12 @@ public final class SubLevelManager {
             Objects.requireNonNull(subLevel, "subLevel");
             Objects.requireNonNull(body, "body");
         }
+    }
+
+    private enum DropMode {
+        NONE,
+        CONTENTS,
+        RESOURCES
     }
 
     private record RemovedBlocks(Map<BlockPos, SubLevelBlock> blocksByLocalPos) {

@@ -12,9 +12,11 @@ import java.util.Set;
 import com.firedoge.px4mc.api.PhysicsVector;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
+import org.jetbrains.annotations.Nullable;
 
 public final class SubLevelSectionStorage {
     public static final int SECTION_SIZE = 16;
@@ -87,6 +89,17 @@ public final class SubLevelSectionStorage {
         BlockPos localPos = block.localPos().immutable();
         blocksByLocalPos.put(localPos, block);
         dirtyLocalPositions.add(localPos);
+    }
+
+    public boolean updateBlockEntityTag(BlockPos localPos, @Nullable CompoundTag blockEntityTag) {
+        requireLocal(localPos);
+        BlockPos immutable = localPos.immutable();
+        SubLevelBlock block = blocksByLocalPos.get(immutable);
+        if (block == null) {
+            return false;
+        }
+        blocksByLocalPos.put(immutable, block.withBlockEntityTag(blockEntityTag));
+        return true;
     }
 
     public void setBlockState(BlockPos localPos, BlockState blockState, AABB localCollisionBounds) {

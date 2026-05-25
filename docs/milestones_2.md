@@ -46,6 +46,8 @@
 
 当前状态：开始补一致性边界。物理 body 重建改为 replacement body 和 plot chunk 重建都成功后再替换旧 body；body id 变化后会刷新 debug visual，并同时按旧 body pose 与新 body pose 扫描清理 orphan visual；破坏路径不再提前局部删除 visual，而是由 rebuild/remove 统一清理和重建；debug visual 启用状态改为显式记录，实体会写入 sublevel 专属 tag，清理时会额外扫描并删除 orphan visual，并兼容清理旧 custom name visual；客户端收到 plot chunk 全量包时会替换整个 `LevelChunk` 对象；plot chunk rebuild 的 full chunk resync 改为 tick 末尾合并发送，避免同一 vanilla/redstone 更新调用栈里的后续 block update 覆盖最终状态；包含 `MOVING_PISTON` 的临时 chunk rebuild 不发送 full chunk resync，也跳过普通单块变化广播，避免客户端通过普通方块包收到无法还原 BlockEntity 的 moving piston；sublevel 拆分时会把原 plot chunk 中对应方块的 block/fluid scheduled ticks 迁到 child plot；活塞 block event 广播会按物理位置计算可见范围，活塞 base/head/moving piston 已加入依赖删除。需要游戏内验证破坏、放置、拆分、restore/remove、活塞以及 visual 是否残留。
 
+补充查漏：sublevel 方块碰撞会从 plot/物理 body 投影成真实世界里的临时 `VoxelShape`，追加到 server/client 两侧 `CollisionGetter#getBlockCollisions`，让玩家和普通实体能先按 vanilla 移动管线站在 sublevel 上。当前是 AABB 投影近似，能覆盖基础站立/阻挡；快速移动平台、旋转平台的速度继承和精确 OBB 碰撞仍属于后续查漏。
+
 ## M5: BlockEntity 兼容
 
 目标：常见 block entity 在 sublevel 内能稳定保存状态、tick、重建后不丢关键数据。
@@ -55,7 +57,9 @@
 - plot chunk 重建后 block entity ticker 不重复、不丢失。
 - block entity NBT 与运行时状态的同步策略明确。
 
-当前状态：开始覆盖发射器/投掷器这类 block entity 交互。plot 坐标中通过 `addFreshEntity` 生成的物品、投射物会在加入世界前映射到 sublevel 物理位置，并旋转初速度方向。需要游戏内验证发射器/投掷器的库存变化、发射实体位置和速度。
+当前状态：开始覆盖发射器/投掷器这类 block entity 交互。plot 坐标中通过 `addFreshEntity` 生成的物品、投射物会在加入世界前映射到 sublevel 物理位置，并旋转初速度方向；sublevel 破坏路径现在会区分 vanilla plot 破坏和 sublevel 自身破坏，前者补容器库存掉落，后者补完整方块掉落与容器库存掉落，掉落实体继续通过 plot->world 投影落到物理位置；捕获物理化源方块时会先保存 block entity NBT，再从源 chunk 移除 block entity 后置空方块，避免箱子、投掷器、发射器在 sublevel 化前按 vanilla 破坏掉出库存；plot 内 block entity 调用 `setChanged()` 时会把最新 NBT 同步回 sublevel 块记录，避免运行时库存/文本状态在后续 rebuild 或 split 时回退到捕获时旧状态；plot chunk rebuild 前会从旧 plot chunk 刷新最新 block entity NBT，并为新 plot chunk 创建新的 block entity 实例，让旧 chunk/ticker 正常卸载旧实例，避免同一个 block entity 实例跨 rebuild 被旧 chunk 标记 removed 后再复用；实体查询投影已覆盖返回 `List` 和写入 output list 两类 `getEntities` 入口，让漏斗吸物品、比较器读物品展示框以及类似 block entity 查询路径更稳定；物品展示框这类附着实体会记录 plot 锚点并投影到物理世界，原版支撑检查回读 plot 支撑方块，避免因为世界坐标没有支撑方块而自动掉落；展示框旋转时的比较器邻居通知会回写到 plot 锚点，避免只通知物理世界坐标；restore 回源前会从 plot chunk 或 sublevel 缓存抓取最新 block entity NBT，并在 source 坐标重建 block entity，避免箱子、投掷器、发射器这类运行时状态回源后变空。需要游戏内验证箱子、投掷器、发射器的物理化捕获不掉库存、破坏掉落、运行中改库存后 rebuild/split 不丢状态、漏斗吸物品/传容器、比较器读容器/物品展示框，以及发射器/投掷器的库存变化、发射实体位置和速度。
+
+补充查漏：同一 plot TNT 在同一 server tick 内重复 prime 会被去重，避免比较器/邻居更新链路生成双 TNT 实体；客户端侧也会把 sublevel plot block 的交互距离映射到物理位置，避免告示牌编辑界面因为客户端距离判定瞬间关闭。液体放置仍未支持，暂时延期。
 
 ## M6: 生命周期与清理
 
@@ -65,6 +69,8 @@
 - 没有残留 plot chunk、tick container、block entity ticker、物理 body、客户端假 chunk。
 - 服务器关闭、维度卸载、sublevel 删除路径都能安全释放资源。
 - 如果暂不做完整持久化，运行时清理边界必须稳定。
+
+当前状态：开始第一轮运行时清理边界。sublevel 移除、forget、body 丢失、拆分失败/原体替换、无碰撞重建、服务器关闭等路径会统一做移除准备：标记 removing，主动丢弃该 sublevel 登记的附着实体（例如物品展示框），并清空 block entity 缓存；服务器关闭时还会按 level 额外扫描清理未归属到具体 sublevel 的附着实体登记。需要游戏内验证 remove/clear/server stop 后没有展示框实体、plot chunk、ticker、visual 残留。
 
 ## M7: 兼容测试集
 

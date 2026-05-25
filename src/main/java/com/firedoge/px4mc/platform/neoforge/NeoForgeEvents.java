@@ -47,6 +47,7 @@ public final class NeoForgeEvents {
         SubLevelManager.INSTANCE.tick(event.getServer());
         for (ServerLevel level : event.getServer().getAllLevels()) {
             SubLevelContainers.server(level).ifPresent(container -> {
+                SubLevelEntityBridge.tickAttachedEntities(level, container);
                 SubLevelEntityBridge.tickEntityInside(level, container);
                 container.trackingSystem().tick();
             });

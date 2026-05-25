@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.function.Predicate;
 
 import javax.annotation.Nullable;
@@ -17,26 +18,142 @@ import com.firedoge.px4mc.PhysX4mc;
 import com.firedoge.px4mc.api.PhysicsVector;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.SectionPos;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.decoration.BlockAttachedEntity;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.entity.EntityTypeTest;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
 
 public final class SubLevelEntityBridge {
     private static final double EPSILON = 1.0E-7D;
     private static final double SEARCH_EPSILON = 1.0E-5D;
     private static final int MAX_ENTITY_INSIDE_BLOCKS = 512;
+    private static final String ATTACHED_ENTITY_TAG = "px4mc_sublevel_attached";
     private static final ThreadLocal<Boolean> PROJECTING_QUERY = ThreadLocal.withInitial(() -> false);
+    private static final Map<AttachedEntityKey, AttachedEntity> ATTACHED_ENTITIES = new LinkedHashMap<>();
 
     private SubLevelEntityBridge() {
     }
 
     public static boolean isProjectingQuery() {
         return PROJECTING_QUERY.get();
+    }
+
+    public static void registerPlotAttachedEntity(
+            ServerLevel level,
+            BlockAttachedEntity entity,
+            BlockPos plotAnchor,
+            Vec3 plotPosition,
+            AABB plotBounds
+    ) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(entity, "entity");
+        Objects.requireNonNull(plotAnchor, "plotAnchor");
+        Objects.requireNonNull(plotPosition, "plotPosition");
+        Objects.requireNonNull(plotBounds, "plotBounds");
+        AttachedEntity attachedEntity = new AttachedEntity(
+                level.dimension(),
+                entity.getUUID(),
+                plotAnchor.immutable(),
+                plotPosition,
+                plotBounds
+        );
+        ATTACHED_ENTITIES.put(attachedEntity.key(), attachedEntity);
+        entity.addTag(ATTACHED_ENTITY_TAG);
+        syncAttachedEntity(level, entity, attachedEntity);
+    }
+
+    public static void unregisterPlotAttachedEntity(ServerLevel level, Entity entity) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(entity, "entity");
+        ATTACHED_ENTITIES.remove(new AttachedEntityKey(level.dimension(), entity.getUUID()));
+        entity.removeTag(ATTACHED_ENTITY_TAG);
+    }
+
+    public static int discardAttachedEntities(ServerLevel level, PhysicsSubLevel subLevel) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(subLevel, "subLevel");
+        int discarded = 0;
+        for (AttachedEntity attachedEntity : List.copyOf(ATTACHED_ENTITIES.values())) {
+            if (!attachedEntity.levelKey().equals(level.dimension())
+                    || !containsAttachedEntityAnchor(subLevel, attachedEntity.plotAnchor())) {
+                continue;
+            }
+            discardAttachedEntity(level, attachedEntity);
+            discarded++;
+        }
+        return discarded;
+    }
+
+    public static int discardAttachedEntities(ServerLevel level) {
+        Objects.requireNonNull(level, "level");
+        int discarded = 0;
+        for (AttachedEntity attachedEntity : List.copyOf(ATTACHED_ENTITIES.values())) {
+            if (!attachedEntity.levelKey().equals(level.dimension())) {
+                continue;
+            }
+            discardAttachedEntity(level, attachedEntity);
+            discarded++;
+        }
+        return discarded;
+    }
+
+    public static void tickAttachedEntities(ServerLevel level, ServerSubLevelContainer container) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(container, "container");
+        if (ATTACHED_ENTITIES.isEmpty()) {
+            return;
+        }
+
+        for (AttachedEntity attachedEntity : List.copyOf(ATTACHED_ENTITIES.values())) {
+            if (!attachedEntity.levelKey().equals(level.dimension())) {
+                continue;
+            }
+            Entity entity = level.getEntity(attachedEntity.entityId());
+            if (!(entity instanceof BlockAttachedEntity blockAttachedEntity) || entity.isRemoved()) {
+                ATTACHED_ENTITIES.remove(attachedEntity.key());
+                continue;
+            }
+            if (!containsAttachedEntityAnchor(container, attachedEntity.plotAnchor())) {
+                ATTACHED_ENTITIES.remove(attachedEntity.key());
+                entity.removeTag(ATTACHED_ENTITY_TAG);
+                continue;
+            }
+            syncAttachedEntity(level, blockAttachedEntity, attachedEntity);
+        }
+    }
+
+    public static Optional<BlockState> attachedSupportBlockState(ServerLevel level, Entity entity) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(entity, "entity");
+        AttachedEntity attachedEntity = ATTACHED_ENTITIES.get(new AttachedEntityKey(level.dimension(), entity.getUUID()));
+        if (!isRegisteredAttachedEntity(entity, attachedEntity)) {
+            return Optional.empty();
+        }
+        DirectionAccessor direction = directionAccessor(entity);
+        if (direction == null) {
+            return Optional.empty();
+        }
+        BlockPos plotSupport = attachedEntity.plotAnchor().relative(direction.direction().getOpposite());
+        return Optional.of(level.getBlockState(plotSupport));
+    }
+
+    public static Optional<BlockPos> attachedPlotAnchor(ServerLevel level, Entity entity) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(entity, "entity");
+        AttachedEntity attachedEntity = ATTACHED_ENTITIES.get(new AttachedEntityKey(level.dimension(), entity.getUUID()));
+        if (!isRegisteredAttachedEntity(entity, attachedEntity)) {
+            return Optional.empty();
+        }
+        return Optional.of(attachedEntity.plotAnchor());
     }
 
     public static void tickEntityInside(ServerLevel level, ServerSubLevelContainer container) {
@@ -110,12 +227,23 @@ public final class SubLevelEntityBridge {
             Predicate<? super T> predicate,
             List<T> existing
     ) {
+        return projectedEntities(level, entityTypeTest, plotBounds, predicate, existing, Integer.MAX_VALUE);
+    }
+
+    public static <T extends Entity> List<T> projectedEntities(
+            ServerLevel level,
+            EntityTypeTest<Entity, T> entityTypeTest,
+            AABB plotBounds,
+            Predicate<? super T> predicate,
+            Iterable<?> existing,
+            int maxAdditionalResults
+    ) {
         Objects.requireNonNull(level, "level");
         Objects.requireNonNull(entityTypeTest, "entityTypeTest");
         Objects.requireNonNull(plotBounds, "plotBounds");
         Objects.requireNonNull(predicate, "predicate");
         Objects.requireNonNull(existing, "existing");
-        if (PROJECTING_QUERY.get()) {
+        if (PROJECTING_QUERY.get() || maxAdditionalResults <= 0) {
             return List.of();
         }
 
@@ -124,7 +252,7 @@ public final class SubLevelEntityBridge {
             return List.of();
         }
 
-        Set<T> seen = identitySet(existing);
+        Set<Entity> seen = identityEntitySet(existing);
         List<T> projected = new ArrayList<>();
         for (QueryTarget target : targets) {
             AABB worldSearchBounds = plotAabbToWorldAabb(target, plotBounds).inflate(SEARCH_EPSILON);
@@ -134,10 +262,94 @@ public final class SubLevelEntityBridge {
                 }
                 if (worldAabbToPlotAabb(target, entity.getBoundingBox()).intersects(plotBounds)) {
                     projected.add(entity);
+                    if (projected.size() >= maxAdditionalResults) {
+                        return List.copyOf(projected);
+                    }
                 }
             }
         }
         return List.copyOf(projected);
+    }
+
+    private static void syncAttachedEntity(ServerLevel level, BlockAttachedEntity entity, AttachedEntity attachedEntity) {
+        SubLevelManager.PlotProjection projection = attachedEntityProjection(level, attachedEntity.plotAnchor()).orElse(null);
+        if (projection == null) {
+            return;
+        }
+
+        PhysicsVector worldAnchor = projection.toWorld(Vec3.atCenterOf(attachedEntity.plotAnchor()));
+        PhysicsVector worldPosition = projection.toWorld(attachedEntity.plotPosition());
+        AABB worldBounds = plotAabbToWorldAabb(projection, attachedEntity.plotPosition(), attachedEntity.plotBounds());
+        entity.setPos(worldAnchor.x(), worldAnchor.y(), worldAnchor.z());
+        entity.setPosRaw(worldPosition.x(), worldPosition.y(), worldPosition.z());
+        entity.syncPacketPositionCodec(worldPosition.x(), worldPosition.y(), worldPosition.z());
+        entity.setBoundingBox(worldBounds);
+    }
+
+    private static Optional<SubLevelManager.PlotProjection> attachedEntityProjection(ServerLevel level, BlockPos plotAnchor) {
+        Optional<SubLevelManager.PlotProjection> direct = SubLevelManager.INSTANCE.plotProjection(level, plotAnchor);
+        if (direct.isPresent()) {
+            return direct;
+        }
+        for (Direction direction : Direction.values()) {
+            Optional<SubLevelManager.PlotProjection> projection = SubLevelManager.INSTANCE
+                    .plotProjection(level, plotAnchor.relative(direction));
+            if (projection.isPresent()) {
+                return projection;
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static boolean containsAttachedEntityAnchor(ServerSubLevelContainer container, BlockPos plotAnchor) {
+        if (container.subLevelAtPlotBlock(plotAnchor).isPresent()) {
+            return true;
+        }
+        for (Direction direction : Direction.values()) {
+            if (container.subLevelAtPlotBlock(plotAnchor.relative(direction)).isPresent()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean containsAttachedEntityAnchor(PhysicsSubLevel subLevel, BlockPos plotAnchor) {
+        if (subLevel.plot().containsPlotBlockPos(plotAnchor)) {
+            return true;
+        }
+        for (Direction direction : Direction.values()) {
+            if (subLevel.plot().containsPlotBlockPos(plotAnchor.relative(direction))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void discardAttachedEntity(ServerLevel level, AttachedEntity attachedEntity) {
+        Entity entity = level.getEntity(attachedEntity.entityId());
+        if (entity != null && !entity.isRemoved()) {
+            entity.discard();
+        }
+        ATTACHED_ENTITIES.remove(attachedEntity.key());
+    }
+
+    private static AABB plotAabbToWorldAabb(
+            SubLevelManager.PlotProjection projection,
+            Vec3 plotOrigin,
+            AABB plotBounds
+    ) {
+        BoundsBuilder builder = new BoundsBuilder();
+        PhysicsVector worldOrigin = projection.toWorld(plotOrigin);
+        forEachCorner(plotBounds, (x, y, z) -> {
+            Vec3 offset = new Vec3(x - plotOrigin.x(), y - plotOrigin.y(), z - plotOrigin.z());
+            PhysicsVector worldOffset = projection.directionToWorld(offset);
+            builder.include(new PhysicsVector(
+                    worldOrigin.x() + worldOffset.x(),
+                    worldOrigin.y() + worldOffset.y(),
+                    worldOrigin.z() + worldOffset.z()
+            ));
+        });
+        return builder.build();
     }
 
     private static void dispatchEntityInside(ServerLevel level, PhysicsSubLevel subLevel, Entity entity, AABB projectedBounds) {
@@ -309,6 +521,16 @@ public final class SubLevelEntityBridge {
         return seen;
     }
 
+    private static Set<Entity> identityEntitySet(Iterable<?> existing) {
+        Set<Entity> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (Object value : existing) {
+            if (value instanceof Entity entity) {
+                seen.add(entity);
+            }
+        }
+        return seen;
+    }
+
     private static void forEachCorner(AABB bounds, CornerConsumer consumer) {
         consumer.accept(bounds.minX, bounds.minY, bounds.minZ);
         consumer.accept(bounds.minX, bounds.minY, bounds.maxZ);
@@ -323,6 +545,51 @@ public final class SubLevelEntityBridge {
     @FunctionalInterface
     private interface CornerConsumer {
         void accept(double x, double y, double z);
+    }
+
+    private static DirectionAccessor directionAccessor(Entity entity) {
+        if (entity instanceof net.minecraft.world.entity.decoration.HangingEntity hangingEntity) {
+            return hangingEntity::getDirection;
+        }
+        return null;
+    }
+
+    private static boolean isRegisteredAttachedEntity(Entity entity, @Nullable AttachedEntity attachedEntity) {
+        return attachedEntity != null
+                && entity instanceof BlockAttachedEntity
+                && entity.getTags().contains(ATTACHED_ENTITY_TAG);
+    }
+
+    @FunctionalInterface
+    private interface DirectionAccessor {
+        Direction direction();
+    }
+
+    private record AttachedEntityKey(ResourceKey<Level> levelKey, UUID entityId) {
+        private AttachedEntityKey {
+            Objects.requireNonNull(levelKey, "levelKey");
+            Objects.requireNonNull(entityId, "entityId");
+        }
+    }
+
+    private record AttachedEntity(
+            ResourceKey<Level> levelKey,
+            UUID entityId,
+            BlockPos plotAnchor,
+            Vec3 plotPosition,
+            AABB plotBounds
+    ) {
+        private AttachedEntity {
+            Objects.requireNonNull(levelKey, "levelKey");
+            Objects.requireNonNull(entityId, "entityId");
+            Objects.requireNonNull(plotAnchor, "plotAnchor");
+            Objects.requireNonNull(plotPosition, "plotPosition");
+            Objects.requireNonNull(plotBounds, "plotBounds");
+        }
+
+        private AttachedEntityKey key() {
+            return new AttachedEntityKey(levelKey, entityId);
+        }
     }
 
     private record QueryTarget(

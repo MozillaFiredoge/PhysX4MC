@@ -58,6 +58,10 @@ public record SubLevelBlock(
         return new SubLevelBlock(sourcePos, localPos, blockState, localCollisionBounds, localCollisionBoxes, visualLocalOrigin, blockEntityTag);
     }
 
+    public SubLevelBlock withBlockEntityTag(@Nullable CompoundTag blockEntityTag) {
+        return new SubLevelBlock(sourcePos, localPos, blockState, localCollisionBounds, localCollisionBoxes, visualLocalOrigin, blockEntityTag);
+    }
+
     public boolean hasPhysicalCollision() {
         return !localCollisionBoxes.isEmpty();
     }

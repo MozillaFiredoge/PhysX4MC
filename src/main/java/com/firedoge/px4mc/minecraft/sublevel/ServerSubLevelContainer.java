@@ -16,11 +16,9 @@ import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Block;
-import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.EntityBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.UpgradeData;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
@@ -36,7 +34,7 @@ public final class ServerSubLevelContainer implements SubLevelContainer {
     private final SubLevelPlotAllocator plotAllocator = new SubLevelPlotAllocator();
     private final SubLevelTrackingSystem trackingSystem = new SubLevelTrackingSystem(this);
     private final ThreadLocal<Boolean> rebuildingPlotChunks = ThreadLocal.withInitial(() -> false);
-    private static final int DEFAULT_BLOCK_UPDATE_PRIME_TICKS = 8;
+    private static final int DEFAULT_BLOCK_UPDATE_PRIME_TICKS = 1;
 
     public ServerSubLevelContainer(ServerLevel level) {
         this.level = Objects.requireNonNull(level, "level");
@@ -206,12 +204,46 @@ public final class ServerSubLevelContainer implements SubLevelContainer {
 
     public void rebuildPlotChunks(PhysicsSubLevel subLevel) {
         Objects.requireNonNull(subLevel, "subLevel");
-        Map<ChunkPos, PlotChunkHolder> rebuilt = buildPlotChunkHolders(subLevel);
-        List<LevelChunk> rebuiltChunks = rebuilt.values().stream()
+        refreshBlockEntityTagsFromLiveChunks(subLevel);
+        RebuiltPlotChunks rebuilt = buildPlotChunkHolders(subLevel);
+        List<LevelChunk> rebuiltChunks = rebuilt.holders().values().stream()
                 .map(PlotChunkHolder::chunk)
                 .toList();
-        installRebuiltPlotChunks(subLevel, rebuilt);
+        installRebuiltPlotChunks(subLevel, rebuilt.holders());
+        subLevel.replaceBlockEntities(rebuilt.blockEntitiesByLocalPos());
         trackingSystem.onSubLevelChunksRebuilt(subLevel, rebuiltChunks);
+    }
+
+    public boolean setPlotChunkBlockStateInPlace(BlockPos plotPos, BlockState blockState, boolean isMoving) {
+        Objects.requireNonNull(plotPos, "plotPos");
+        Objects.requireNonNull(blockState, "blockState");
+        LevelChunk chunk = plotChunk(new ChunkPos(plotPos)).orElse(null);
+        if (chunk == null) {
+            return false;
+        }
+
+        rebuildingPlotChunks.set(true);
+        try {
+            BlockState previous = chunk.setBlockState(plotPos, blockState, isMoving);
+            return previous != null || chunk.getBlockState(plotPos).equals(blockState);
+        } finally {
+            rebuildingPlotChunks.set(false);
+        }
+    }
+
+    public void removePlotChunkBlockEntityInPlace(BlockPos plotPos) {
+        Objects.requireNonNull(plotPos, "plotPos");
+        LevelChunk chunk = plotChunk(new ChunkPos(plotPos)).orElse(null);
+        if (chunk == null) {
+            return;
+        }
+
+        rebuildingPlotChunks.set(true);
+        try {
+            chunk.removeBlockEntity(plotPos);
+        } finally {
+            rebuildingPlotChunks.set(false);
+        }
     }
 
     public void moveSourceScheduledTicksToPlot(PhysicsSubLevel subLevel) {
@@ -272,7 +304,6 @@ public final class ServerSubLevelContainer implements SubLevelContainer {
 
         for (SubLevelBlock block : List.copyOf(subLevel.blocks())) {
             BlockPos plotPos = subLevel.plot().toPlotBlockPos(block.localPos());
-            BlockState live = level.getBlockState(plotPos);
             Block currentBlock = level.getBlockState(plotPos).getBlock();
             if (currentBlock != block.blockState().getBlock()) {
                 continue;
@@ -285,16 +316,6 @@ public final class ServerSubLevelContainer implements SubLevelContainer {
             level.updateNeighborsAt(plotPos, currentBlock);
             for (Direction direction : Direction.values()) {
                 level.updateNeighborsAt(plotPos.relative(direction), currentBlock);
-            }
-            if (currentBlock == Blocks.REPEATER || currentBlock == Blocks.COMPARATOR) {
-                BlockState state = block.blockState();
-                BlockPos pos = subLevel.plot().toPlotBlockPos(block.localPos());
-                Direction facing = state.getValue(BlockStateProperties.HORIZONTAL_FACING);
-                BlockPos outputPos = pos.relative(facing.getOpposite());
-                level.neighborChanged(outputPos, state.getBlock(), pos);
-                level.updateNeighborsAtExceptFromFacing(outputPos, state.getBlock(), facing);
-                level.scheduleTick(plotPos, currentBlock, 1);
-                level.getBlockState(plotPos).tick(level, plotPos, level.random);
             }
         }
     }
@@ -374,9 +395,10 @@ public final class ServerSubLevelContainer implements SubLevelContainer {
         }
     }
 
-    private Map<ChunkPos, PlotChunkHolder> buildPlotChunkHolders(PhysicsSubLevel subLevel) {
+    private RebuiltPlotChunks buildPlotChunkHolders(PhysicsSubLevel subLevel) {
         Map<ChunkPos, PreservedTicks> preservedTicks = preservedPlotTicks(subLevel);
         Map<ChunkPos, LevelChunk> chunks = new LinkedHashMap<>();
+        Map<BlockPos, BlockEntity> blockEntitiesByLocalPos = new LinkedHashMap<>();
         for (ChunkPos chunkPos : subLevel.plot().chunkPositions()) {
             chunks.put(chunkPos, newPlotChunk(chunkPos, preservedTicks.get(chunkPos)));
         }
@@ -390,7 +412,7 @@ public final class ServerSubLevelContainer implements SubLevelContainer {
             rebuildingPlotChunks.set(true);
             try {
                 chunk.setBlockState(plotPos, block.blockState(), false);
-                addBlockEntity(chunk, subLevel, block, plotPos);
+                addBlockEntity(chunk, subLevel, blockEntitiesByLocalPos, block, plotPos);
             } finally {
                 rebuildingPlotChunks.set(false);
             }
@@ -400,7 +422,7 @@ public final class ServerSubLevelContainer implements SubLevelContainer {
         for (Map.Entry<ChunkPos, LevelChunk> entry : chunks.entrySet()) {
             holders.put(entry.getKey(), PlotChunkHolder.create(level, entry.getValue()));
         }
-        return holders;
+        return new RebuiltPlotChunks(holders, blockEntitiesByLocalPos);
     }
 
     private LevelChunk newPlotChunk(ChunkPos chunkPos, PreservedTicks preservedTicks) {
@@ -511,17 +533,33 @@ public final class ServerSubLevelContainer implements SubLevelContainer {
         level.getFluidTicks().clearArea(plotArea);
     }
 
-    private void addBlockEntity(LevelChunk chunk, PhysicsSubLevel subLevel, SubLevelBlock block, BlockPos plotPos) {
-        Optional<BlockEntity> cached = subLevel.blockEntity(block.localPos()).filter(blockEntity -> !blockEntity.isRemoved());
-        if (cached.isPresent()) {
-            chunk.setBlockEntity(cached.get());
-            return;
-        }
-
+    private void addBlockEntity(
+            LevelChunk chunk,
+            PhysicsSubLevel subLevel,
+            Map<BlockPos, BlockEntity> blockEntitiesByLocalPos,
+            SubLevelBlock block,
+            BlockPos plotPos
+    ) {
         BlockEntity blockEntity = createBlockEntity(block, plotPos);
         if (blockEntity != null) {
-            subLevel.putBlockEntity(block.localPos(), blockEntity);
+            blockEntitiesByLocalPos.put(block.localPos().immutable(), blockEntity);
             chunk.setBlockEntity(blockEntity);
+        }
+    }
+
+    private void refreshBlockEntityTagsFromLiveChunks(PhysicsSubLevel subLevel) {
+        for (SubLevelBlock block : subLevel.blocks()) {
+            BlockPos plotPos = subLevel.plot().toPlotBlockPos(block.localPos());
+            BlockEntity blockEntity = plotChunk(new ChunkPos(plotPos))
+                    .map(chunk -> chunk.getBlockEntity(plotPos))
+                    .filter(entity -> !entity.isRemoved())
+                    .orElse(null);
+            if (blockEntity != null) {
+                subLevel.section().updateBlockEntityTag(
+                        block.localPos(),
+                        blockEntity.saveWithFullMetadata(level.registryAccess())
+                );
+            }
         }
     }
 
@@ -556,6 +594,16 @@ public final class ServerSubLevelContainer implements SubLevelContainer {
         private PreservedTicks {
             Objects.requireNonNull(blockTicks, "blockTicks");
             Objects.requireNonNull(fluidTicks, "fluidTicks");
+        }
+    }
+
+    private record RebuiltPlotChunks(
+            Map<ChunkPos, PlotChunkHolder> holders,
+            Map<BlockPos, BlockEntity> blockEntitiesByLocalPos
+    ) {
+        private RebuiltPlotChunks {
+            holders = Map.copyOf(holders);
+            blockEntitiesByLocalPos = Map.copyOf(blockEntitiesByLocalPos);
         }
     }
 }

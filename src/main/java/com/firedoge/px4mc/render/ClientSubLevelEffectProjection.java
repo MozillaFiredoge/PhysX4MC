@@ -3,10 +3,12 @@ package com.firedoge.px4mc.render;
 import java.util.Objects;
 import java.util.Optional;
 
+import com.firedoge.px4mc.api.PhysicsVector;
 import com.firedoge.px4mc.minecraft.sublevel.ClientSubLevelContainer;
 import com.firedoge.px4mc.minecraft.sublevel.ClientTrackedSubLevel;
 import com.firedoge.px4mc.minecraft.sublevel.SubLevelClientMetadata;
 import com.firedoge.px4mc.minecraft.sublevel.SubLevelContainers;
+import com.firedoge.px4mc.minecraft.sublevel.SubLevelTransform;
 
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
@@ -70,6 +72,19 @@ public final class ClientSubLevelEffectProjection {
             return subLevel != null
                     ? ClientSubLevelSelection.plotDirectionToWorld(plotDirection, subLevel)
                     : ClientSubLevelSelection.plotDirectionToWorld(plotDirection, metadata);
+        }
+
+        public Vec3 worldToPlot(Vec3 worldPosition) {
+            Objects.requireNonNull(worldPosition, "worldPosition");
+            SubLevelClientMetadata currentMetadata = subLevel != null ? subLevel.metadata() : metadata;
+            PhysicsVector local = SubLevelTransform.from(subLevel != null ? subLevel.pose() : metadata.pose())
+                    .worldToLocal(new PhysicsVector(worldPosition.x, worldPosition.y, worldPosition.z));
+            PhysicsVector bodyToPlotOrigin = currentMetadata.bodyToPlotOrigin();
+            return new Vec3(
+                    local.x() - bodyToPlotOrigin.x() + currentMetadata.plot().minPlotX(),
+                    local.y() - bodyToPlotOrigin.y() + currentMetadata.plot().minPlotY(),
+                    local.z() - bodyToPlotOrigin.z() + currentMetadata.plot().minPlotZ()
+            );
         }
     }
 }

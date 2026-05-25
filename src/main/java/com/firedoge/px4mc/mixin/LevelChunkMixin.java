@@ -2,6 +2,7 @@ package com.firedoge.px4mc.mixin;
 
 import java.util.Optional;
 
+import com.firedoge.px4mc.minecraft.sublevel.ClientSubLevelContainer;
 import com.firedoge.px4mc.minecraft.sublevel.PhysicsSubLevel;
 import com.firedoge.px4mc.minecraft.sublevel.ServerSubLevelContainer;
 import com.firedoge.px4mc.minecraft.sublevel.SubLevelContainers;
@@ -56,6 +57,26 @@ public abstract class LevelChunkMixin {
         cir.setReturnValue(previous);
     }
 
+    @Inject(method = "setBlockState", at = @At("RETURN"))
+    private void px4mc$markClientPlotChunkBlockChanged(
+            BlockPos pos,
+            BlockState state,
+            boolean isMoving,
+            CallbackInfoReturnable<BlockState> cir
+    ) {
+        if (!level.isClientSide()) {
+            return;
+        }
+
+        ClientSubLevelContainer container = SubLevelContainers.container(level)
+                .filter(ClientSubLevelContainer.class::isInstance)
+                .map(ClientSubLevelContainer.class::cast)
+                .orElse(null);
+        if (container != null && container.inPlotBounds(new ChunkPos(pos))) {
+            container.markPlotBlockChanged(pos);
+        }
+    }
+
     @Inject(method = "setBlockEntity", at = @At("HEAD"), cancellable = true)
     private void px4mc$setPlotChunkBlockEntity(BlockEntity blockEntity, CallbackInfo ci) {
         ServerSubLevelContainer container = px4mc$plotContainer(blockEntity.getBlockPos());
@@ -93,6 +114,9 @@ public abstract class LevelChunkMixin {
     @Unique
     private void px4mc$runLatePlotDiodePlaceHook(BlockPos pos, BlockState previous, BlockState requested, boolean isMoving) {
         if (level.captureBlockSnapshots || previous.equals(requested) || !(requested.getBlock() instanceof DiodeBlock)) {
+            return;
+        }
+        if (((LevelChunk) (Object) this).getBlockState(pos).equals(requested)) {
             return;
         }
 

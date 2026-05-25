@@ -5,7 +5,9 @@
   "minVersion": "0.8",
   "client": [
     "ClientChunkCacheMixin",
+    "ClientCollisionGetterMixin",
     "ClientLevelMixin",
+    "ClientPlayerMixin",
     "GameRendererMixin",
     "LevelRendererMixin",
     "ParticleEngineMixin"
@@ -13,6 +15,8 @@
   "mixins": [
     "BlockMixin",
     "ChunkMapMixin",
+    "CollisionGetterMixin",
+    "ItemFrameMixin",
     "LevelChunkMixin",
     "LevelMixin",
     "PlayerMixin",

@@ -80,7 +80,7 @@ final class SubLevelAssembler {
         MechanicsBodySnapshot body = null;
         try {
             for (SubLevelBlock block : captureRemovalOrder(blocks)) {
-                if (!level.setBlock(block.sourcePos(), Blocks.AIR.defaultBlockState(), CAPTURE_REMOVE_FLAGS)) {
+                if (!removeSourceBlockForCapture(level, block)) {
                     throw new IllegalStateException("Failed to remove block at " + describePos(block.sourcePos()));
                 }
                 removedBlocks.add(block);
@@ -109,6 +109,7 @@ final class SubLevelAssembler {
             for (int i = removedBlocks.size() - 1; i >= 0; i--) {
                 SubLevelBlock block = removedBlocks.get(i);
                 level.setBlock(block.sourcePos(), block.blockState(), BLOCK_UPDATE_FLAGS);
+                restoreSourceBlockEntity(level, block);
             }
             refreshTerrainAround(level, removedBlocks);
             throw exception;
@@ -167,6 +168,38 @@ final class SubLevelAssembler {
     private static CompoundTag blockEntityTag(ServerLevel level, BlockPos pos) {
         BlockEntity blockEntity = level.getBlockEntity(pos);
         return blockEntity == null ? null : blockEntity.saveWithFullMetadata(level.registryAccess());
+    }
+
+    private static boolean removeSourceBlockForCapture(ServerLevel level, SubLevelBlock block) {
+        if (block.blockState().hasBlockEntity()) {
+            level.removeBlockEntity(block.sourcePos());
+        }
+        boolean removed = level.setBlock(block.sourcePos(), Blocks.AIR.defaultBlockState(), CAPTURE_REMOVE_FLAGS);
+        if (!removed) {
+            restoreSourceBlockEntity(level, block);
+        }
+        return removed;
+    }
+
+    private static void restoreSourceBlockEntity(ServerLevel level, SubLevelBlock block) {
+        CompoundTag tag = block.blockEntityTag();
+        if (tag == null || !block.blockState().hasBlockEntity()) {
+            return;
+        }
+
+        CompoundTag sourceTag = tag.copy();
+        sourceTag.putInt("x", block.sourcePos().getX());
+        sourceTag.putInt("y", block.sourcePos().getY());
+        sourceTag.putInt("z", block.sourcePos().getZ());
+        BlockEntity blockEntity = BlockEntity.loadStatic(block.sourcePos(), block.blockState(), sourceTag, level.registryAccess());
+        if (blockEntity == null) {
+            return;
+        }
+
+        blockEntity.setLevel(level);
+        blockEntity.clearRemoved();
+        level.setBlockEntity(blockEntity);
+        blockEntity.setChanged();
     }
 
     static boolean hasPhysicalCollision(List<SubLevelBlock> blocks) {

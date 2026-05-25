@@ -1,10 +1,13 @@
 package com.firedoge.px4mc.mixin;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.function.BooleanSupplier;
 
 import com.firedoge.px4mc.api.PhysicsVector;
 import com.firedoge.px4mc.minecraft.sublevel.ServerSubLevelContainer;
 import com.firedoge.px4mc.minecraft.sublevel.SubLevelContainerHolder;
+import com.firedoge.px4mc.minecraft.sublevel.SubLevelEntityBridge;
 import com.firedoge.px4mc.minecraft.sublevel.SubLevelManager;
 
 import net.minecraft.core.BlockPos;
@@ -21,11 +24,14 @@ import net.minecraft.server.players.PlayerList;
 import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.decoration.BlockAttachedEntity;
+import net.minecraft.world.entity.item.PrimedTnt;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameRules;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.gameevent.GameEvent;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
@@ -46,6 +52,8 @@ public abstract class ServerLevelMixin implements SubLevelContainerHolder {
     private boolean px4mc$projectingSubLevelEffect;
     @Unique
     private boolean px4mc$projectingSubLevelEntity;
+    @Unique
+    private final Map<BlockPos, Long> px4mc$plotPrimedTntBlocks = new HashMap<>();
 
     @Override
     public ServerSubLevelContainer px4mc$subLevelContainer() {
@@ -263,7 +271,8 @@ public abstract class ServerLevelMixin implements SubLevelContainerHolder {
 
     @Inject(method = "addFreshEntity", at = @At("HEAD"), cancellable = true)
     private void px4mc$addPlotEntityAtWorldPosition(Entity entity, CallbackInfoReturnable<Boolean> cir) {
-        if (px4mc$projectingSubLevelEntity || entity.level() != px4mc$self()) {
+        ServerLevel level = px4mc$self();
+        if (px4mc$projectingSubLevelEntity || entity.level() != level) {
             return;
         }
         Vec3 plotPosition = entity.position();
@@ -271,18 +280,41 @@ public abstract class ServerLevelMixin implements SubLevelContainerHolder {
         if (projection == null) {
             return;
         }
+        if (entity instanceof PrimedTnt && !px4mc$claimPlotPrimedTnt(level, plotPosition)) {
+            cir.setReturnValue(false);
+            return;
+        }
 
-        PhysicsVector worldPosition = projection.toWorld(plotPosition);
-        PhysicsVector worldMovement = projection.directionToWorld(entity.getDeltaMovement());
-        entity.setPos(worldPosition.x(), worldPosition.y(), worldPosition.z());
-        entity.setDeltaMovement(worldMovement.x(), worldMovement.y(), worldMovement.z());
+        if (entity instanceof BlockAttachedEntity blockAttachedEntity) {
+            BlockPos plotAnchor = blockAttachedEntity.getPos();
+            AABB plotBounds = entity.getBoundingBox();
+            SubLevelEntityBridge.registerPlotAttachedEntity(level, blockAttachedEntity, plotAnchor, plotPosition, plotBounds);
+        } else {
+            PhysicsVector worldPosition = projection.toWorld(plotPosition);
+            PhysicsVector worldMovement = projection.directionToWorld(entity.getDeltaMovement());
+            entity.setPos(worldPosition.x(), worldPosition.y(), worldPosition.z());
+            entity.setDeltaMovement(worldMovement.x(), worldMovement.y(), worldMovement.z());
+        }
 
         px4mc$projectingSubLevelEntity = true;
         try {
-            cir.setReturnValue(px4mc$self().addFreshEntity(entity));
+            boolean added = level.addFreshEntity(entity);
+            if (!added && entity instanceof BlockAttachedEntity) {
+                SubLevelEntityBridge.unregisterPlotAttachedEntity(level, entity);
+            }
+            cir.setReturnValue(added);
         } finally {
             px4mc$projectingSubLevelEntity = false;
         }
+    }
+
+    @Unique
+    private boolean px4mc$claimPlotPrimedTnt(ServerLevel level, Vec3 plotPosition) {
+        long gameTime = level.getGameTime();
+        px4mc$plotPrimedTntBlocks.entrySet().removeIf(entry -> entry.getValue() != gameTime);
+        BlockPos plotBlock = BlockPos.containing(plotPosition.x, plotPosition.y, plotPosition.z).immutable();
+        Long previous = px4mc$plotPrimedTntBlocks.put(plotBlock, gameTime);
+        return previous == null || previous.longValue() != gameTime;
     }
 
     @ModifyConstant(method = "destroyBlockProgress", constant = @Constant(doubleValue = 1024.0D))
