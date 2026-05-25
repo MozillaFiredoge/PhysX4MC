@@ -10,10 +10,21 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(ItemFrame.class)
 public abstract class ItemFrameMixin {
+    @Inject(method = "survives", at = @At("HEAD"), cancellable = true)
+    private void px4mc$subLevelAttachedEntitySurvives(CallbackInfoReturnable<Boolean> cir) {
+        Level level = ((ItemFrame) (Object) this).level();
+        if (level instanceof ServerLevel serverLevel) {
+            SubLevelEntityBridge.attachedEntitySurvives(serverLevel, (ItemFrame) (Object) this)
+                    .ifPresent(cir::setReturnValue);
+        }
+    }
+
     @Redirect(
             method = "survives",
             at = @At(

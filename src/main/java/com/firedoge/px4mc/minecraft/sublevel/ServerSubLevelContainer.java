@@ -50,6 +50,10 @@ public final class ServerSubLevelContainer implements SubLevelContainer {
     }
 
     public void add(PhysicsSubLevel subLevel) {
+        add(subLevel, true);
+    }
+
+    public void add(PhysicsSubLevel subLevel, boolean updateTrackingImmediately) {
         Objects.requireNonNull(subLevel, "subLevel");
         synchronized (this) {
             if (!subLevel.levelKey().equals(level.dimension())) {
@@ -66,11 +70,14 @@ public final class ServerSubLevelContainer implements SubLevelContainer {
             if (previous != null) {
                 throw new IllegalArgumentException("Duplicate sublevel id " + subLevel.id());
             }
+            plotAllocator.observe(subLevel.plot().id());
         }
 
         try {
             rebuildPlotChunks(subLevel);
-            trackingSystem.onSubLevelAdded(subLevel);
+            if (updateTrackingImmediately) {
+                trackingSystem.onSubLevelAdded(subLevel);
+            }
         } catch (RuntimeException exception) {
             remove(subLevel.id());
             throw exception;
@@ -561,6 +568,12 @@ public final class ServerSubLevelContainer implements SubLevelContainer {
                 );
             }
         }
+    }
+
+    public void refreshBlockEntityTags(PhysicsSubLevel subLevel) {
+        Objects.requireNonNull(subLevel, "subLevel");
+        requireOwned(subLevel);
+        refreshBlockEntityTagsFromLiveChunks(subLevel);
     }
 
     private BlockEntity createBlockEntity(SubLevelBlock block, BlockPos plotPos) {

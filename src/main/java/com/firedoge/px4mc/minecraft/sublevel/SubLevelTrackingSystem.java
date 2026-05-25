@@ -188,6 +188,9 @@ public final class SubLevelTrackingSystem {
         packets.add(new ClientboundCustomPayloadPacket(new ClientboundFinalizeSubLevelPayload(subLevel.id())));
         player.connection.send(new ClientboundBundlePacket(packets));
         lastSentPoses.put(subLevel.id(), pose);
+        if (playersTracking(subLevel.id()).size() <= 1) {
+            pendingChunkResyncs.remove(subLevel.id());
+        }
     }
 
     private void sendRemoval(ServerPlayer player, PhysicsSubLevel subLevel, List<ChunkPos> removedChunks) {

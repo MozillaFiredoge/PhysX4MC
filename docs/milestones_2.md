@@ -72,16 +72,28 @@
 
 当前状态：开始第一轮运行时清理边界。sublevel 移除、forget、body 丢失、拆分失败/原体替换、无碰撞重建、服务器关闭等路径会统一做移除准备：标记 removing，主动丢弃该 sublevel 登记的附着实体（例如物品展示框），并清空 block entity 缓存；服务器关闭时还会按 level 额外扫描清理未归属到具体 sublevel 的附着实体登记。需要游戏内验证 remove/clear/server stop 后没有展示框实体、plot chunk、ticker、visual 残留。
 
-## M7: 兼容测试集
+## M7: Sublevel 持久化保存
+
+目标：服务器保存/重进世界后，运行中的 sublevel 能以原来的方块、BlockEntity、姿态、速度和 plot 映射恢复。
+
+验收：
+- 退出并重进世界后，sublevel 仍然存在，方块状态、容器/告示牌等 BlockEntity NBT 不丢。
+- 恢复后的 sublevel 继续拥有 PhysX body、plot chunk、客户端追踪和基础交互。
+- 保存会保留 body pose、linear velocity、mass 和稳定 SubLevelId；恢复时重新创建 body，并推进 plot allocator，避免新 sublevel 复用旧 plot slot。
+- sublevel 被删除/forget 后，下一次保存会清空持久化记录。
+
+当前状态：开始最小实现。每个 `ServerLevel` 通过 `SavedData` 保存 sublevel 记录；server tick 首次恢复，之后每 100 tick 捕获一次运行时快照并在有变化时落盘，vanilla level save 前会刷新一次，server stopping 前强制 capture 并 flush。关闭清理阶段会抑制后续 save capture，避免 runtime container 被清空后把持久化文件覆盖成空记录。保存内容包括 SubLevelId、bounds、plot、pose、linear velocity、mass、方块状态、BlockEntity NBT、local collision boxes、visual local origin，以及 plot chunk 中的 block/fluid scheduled tick 队列。恢复前会等待目标附近 chunk 可检查，并同步预热附近 terrain collider，避免 sublevel 先进入物理场景后在 terrain rebuild 前被重力拉走；恢复 plot chunk 后会把保存的 `SavedTick` 按当前 gameTime 重新 schedule 回 `LevelTicks`。
+
+## M8: 兼容测试集
 
 目标：建立固定测试场景，用来反复验证 sublevel 行为。
 
 验收：
-- 覆盖红石钟、压力板门、绊线、活塞、无碰撞方块、block entity、拆分、移除。
+- 覆盖红石钟、压力板门、绊线、活塞、无碰撞方块、block entity、拆分、移除、保存/重进世界。
 - 每次改动后能快速复现核心场景。
 
 ## 建议顺序
 
-优先顺序：M1 -> M2 -> M3 -> M4 -> M5 -> M6。
+优先顺序：M1 -> M2 -> M3 -> M4 -> M5 -> M6 -> M7。
 
-M7 从 M1 后开始积累，不等到最后再补。
+M8 从 M1 后开始积累，不等到最后再补。

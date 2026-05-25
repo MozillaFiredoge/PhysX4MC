@@ -10,6 +10,10 @@ public final class SubLevelPlotAllocator {
 
     private long nextPlotId;
 
+    public synchronized void observe(SubLevelPlotId id) {
+        nextPlotId = Math.max(nextPlotId, id.value() + 1L);
+    }
+
     public synchronized SubLevelPlot allocate(SubLevelBounds bounds, int minSection, int sectionCount) {
         if (nextPlotId >= (long) PLOT_GRID_WIDTH * PLOT_GRID_WIDTH) {
             throw new IllegalStateException("Sublevel plot grid is full");

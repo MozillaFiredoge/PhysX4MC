@@ -16,6 +16,7 @@
     "BlockMixin",
     "ChunkMapMixin",
     "CollisionGetterMixin",
+    "HangingEntityMixin",
     "ItemFrameMixin",
     "LevelChunkMixin",
     "LevelMixin",

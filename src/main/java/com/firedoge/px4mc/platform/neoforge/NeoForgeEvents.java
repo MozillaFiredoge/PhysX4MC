@@ -10,6 +10,7 @@ import com.firedoge.px4mc.minecraft.sublevel.SubLevelEntityBridge;
 import com.firedoge.px4mc.minecraft.sublevel.ServerSubLevelContainer;
 import com.firedoge.px4mc.minecraft.sublevel.SubLevelContainers;
 import com.firedoge.px4mc.minecraft.sublevel.SubLevelManager;
+import com.firedoge.px4mc.minecraft.sublevel.SubLevelPersistence;
 import com.firedoge.px4mc.physics.PhysicsManager;
 
 import net.minecraft.core.Direction;
@@ -20,6 +21,7 @@ import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.level.BlockEvent;
 import net.neoforged.neoforge.event.level.ChunkEvent;
+import net.neoforged.neoforge.event.level.LevelEvent;
 import net.neoforged.neoforge.event.server.ServerStartingEvent;
 import net.neoforged.neoforge.event.server.ServerStoppedEvent;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
@@ -33,6 +35,7 @@ public final class NeoForgeEvents {
 
     @SubscribeEvent
     public void onServerStarting(ServerStartingEvent event) {
+        SubLevelPersistence.startServer();
         boolean physxAvailable = PhysicsManager.INSTANCE.backend(PhysXBackend.ID)
                 .map(backend -> backend.isAvailable())
                 .orElse(false);
@@ -41,6 +44,7 @@ public final class NeoForgeEvents {
 
     @SubscribeEvent
     public void onServerTick(ServerTickEvent.Post event) {
+        SubLevelPersistence.restore(event.getServer());
         PlayerProxyManager.INSTANCE.syncBeforePhysics(event.getServer());
         ServerPhysicsRuntime.INSTANCE.tick(event.getServer());
         PlayerPhysicsManager.INSTANCE.tick(event.getServer());
@@ -52,6 +56,7 @@ public final class NeoForgeEvents {
                 container.trackingSystem().tick();
             });
         }
+        SubLevelPersistence.capturePeriodically(event.getServer());
     }
 
     @SubscribeEvent
@@ -117,7 +122,15 @@ public final class NeoForgeEvents {
     }
 
     @SubscribeEvent
+    public void onLevelSave(LevelEvent.Save event) {
+        if (event.getLevel() instanceof ServerLevel level) {
+            SubLevelPersistence.captureBeforeLevelSave(level);
+        }
+    }
+
+    @SubscribeEvent
     public void onServerStopping(ServerStoppingEvent event) {
+        SubLevelPersistence.flush(event.getServer());
         PlayerProxyManager.INSTANCE.close(event.getServer());
         PlayerPhysicsManager.INSTANCE.close(event.getServer());
         SubLevelManager.INSTANCE.close(event.getServer());

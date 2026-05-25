@@ -25,8 +25,12 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.decoration.BlockAttachedEntity;
+import net.minecraft.world.entity.decoration.HangingEntity;
+import net.minecraft.world.entity.decoration.ItemFrame;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.DiodeBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.entity.EntityTypeTest;
 import net.minecraft.world.phys.AABB;
@@ -156,6 +160,42 @@ public final class SubLevelEntityBridge {
         return Optional.of(attachedEntity.plotAnchor());
     }
 
+    public static boolean isRegisteredAttachedEntity(ServerLevel level, Entity entity) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(entity, "entity");
+        AttachedEntity attachedEntity = ATTACHED_ENTITIES.get(new AttachedEntityKey(level.dimension(), entity.getUUID()));
+        return isRegisteredAttachedEntity(entity, attachedEntity);
+    }
+
+    public static Optional<Boolean> attachedEntitySurvives(ServerLevel level, Entity entity) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(entity, "entity");
+        AttachedEntity attachedEntity = ATTACHED_ENTITIES.get(new AttachedEntityKey(level.dimension(), entity.getUUID()));
+        if (!isRegisteredAttachedEntity(entity, attachedEntity)) {
+            return Optional.empty();
+        }
+        DirectionAccessor directionAccessor = directionAccessor(entity);
+        if (directionAccessor == null) {
+            return Optional.empty();
+        }
+
+        Direction direction = directionAccessor.direction();
+        boolean supported = entity instanceof ItemFrame
+                ? itemFrameSupportSurvives(level, attachedEntity, direction)
+                : hangingSupportSurvives(level, attachedEntity, direction);
+        if (!supported) {
+            return Optional.of(false);
+        }
+
+        boolean noHangingOverlap = queryWorldEntities(
+                level,
+                entity,
+                entity.getBoundingBox().inflate(SEARCH_EPSILON),
+                other -> other instanceof HangingEntity
+        ).isEmpty();
+        return Optional.of(noHangingOverlap);
+    }
+
     public static void tickEntityInside(ServerLevel level, ServerSubLevelContainer container) {
         Objects.requireNonNull(level, "level");
         Objects.requireNonNull(container, "container");
@@ -206,6 +246,7 @@ public final class SubLevelEntityBridge {
 
         Set<Entity> seen = identitySet(existing);
         List<Entity> projected = new ArrayList<>();
+        appendRegisteredAttachedEntities(level, excluded, plotBounds, predicate, seen, projected, Integer.MAX_VALUE);
         for (QueryTarget target : targets) {
             AABB worldSearchBounds = plotAabbToWorldAabb(target, plotBounds).inflate(SEARCH_EPSILON);
             for (Entity entity : queryWorldEntities(level, excluded, worldSearchBounds, predicate)) {
@@ -254,6 +295,10 @@ public final class SubLevelEntityBridge {
 
         Set<Entity> seen = identityEntitySet(existing);
         List<T> projected = new ArrayList<>();
+        appendRegisteredAttachedEntities(level, entityTypeTest, plotBounds, predicate, seen, projected, maxAdditionalResults);
+        if (projected.size() >= maxAdditionalResults) {
+            return List.copyOf(projected);
+        }
         for (QueryTarget target : targets) {
             AABB worldSearchBounds = plotAabbToWorldAabb(target, plotBounds).inflate(SEARCH_EPSILON);
             for (T entity : queryWorldEntities(level, entityTypeTest, worldSearchBounds, predicate)) {
@@ -269,6 +314,81 @@ public final class SubLevelEntityBridge {
             }
         }
         return List.copyOf(projected);
+    }
+
+    private static boolean itemFrameSupportSurvives(ServerLevel level, AttachedEntity attachedEntity, Direction direction) {
+        BlockPos plotSupport = attachedEntity.plotAnchor().relative(direction.getOpposite());
+        BlockState support = level.getBlockState(plotSupport);
+        return support.isSolid() || direction.getAxis().isHorizontal() && DiodeBlock.isDiode(support);
+    }
+
+    private static boolean hangingSupportSurvives(ServerLevel level, AttachedEntity attachedEntity, Direction direction) {
+        AABB supportBox = attachedEntity.plotBounds()
+                .move(-direction.getStepX() * 0.5D, -direction.getStepY() * 0.5D, -direction.getStepZ() * 0.5D)
+                .deflate(EPSILON);
+        return BlockPos.betweenClosedStream(supportBox)
+                .filter(pos -> !Block.canSupportCenter(level, pos, direction))
+                .allMatch(pos -> {
+                    BlockState state = level.getBlockState(pos);
+                    return state.isSolid() || DiodeBlock.isDiode(state);
+                });
+    }
+
+    private static void appendRegisteredAttachedEntities(
+            ServerLevel level,
+            @Nullable Entity excluded,
+            AABB plotBounds,
+            Predicate<? super Entity> predicate,
+            Set<Entity> seen,
+            List<Entity> projected,
+            int maxAdditionalResults
+    ) {
+        if (projected.size() >= maxAdditionalResults) {
+            return;
+        }
+        for (AttachedEntity attachedEntity : ATTACHED_ENTITIES.values()) {
+            if (!attachedEntity.levelKey().equals(level.dimension())
+                    || !attachedEntity.plotBounds().intersects(plotBounds)) {
+                continue;
+            }
+            Entity entity = level.getEntity(attachedEntity.entityId());
+            if (entity == null || entity == excluded || entity.isRemoved() || !predicate.test(entity) || !seen.add(entity)) {
+                continue;
+            }
+            projected.add(entity);
+            if (projected.size() >= maxAdditionalResults) {
+                return;
+            }
+        }
+    }
+
+    private static <T extends Entity> void appendRegisteredAttachedEntities(
+            ServerLevel level,
+            EntityTypeTest<Entity, T> entityTypeTest,
+            AABB plotBounds,
+            Predicate<? super T> predicate,
+            Set<Entity> seen,
+            List<T> projected,
+            int maxAdditionalResults
+    ) {
+        if (projected.size() >= maxAdditionalResults) {
+            return;
+        }
+        for (AttachedEntity attachedEntity : ATTACHED_ENTITIES.values()) {
+            if (!attachedEntity.levelKey().equals(level.dimension())
+                    || !attachedEntity.plotBounds().intersects(plotBounds)) {
+                continue;
+            }
+            Entity entity = level.getEntity(attachedEntity.entityId());
+            T typed = entity == null ? null : entityTypeTest.tryCast(entity);
+            if (typed == null || typed.isRemoved() || !predicate.test(typed) || !seen.add(typed)) {
+                continue;
+            }
+            projected.add(typed);
+            if (projected.size() >= maxAdditionalResults) {
+                return;
+            }
+        }
     }
 
     private static void syncAttachedEntity(ServerLevel level, BlockAttachedEntity entity, AttachedEntity attachedEntity) {

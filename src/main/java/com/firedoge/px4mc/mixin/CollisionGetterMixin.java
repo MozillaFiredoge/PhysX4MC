@@ -2,6 +2,7 @@ package com.firedoge.px4mc.mixin;
 
 import java.util.List;
 
+import com.firedoge.px4mc.minecraft.sublevel.SubLevelEntityBridge;
 import com.firedoge.px4mc.minecraft.sublevel.SubLevelManager;
 import com.google.common.collect.Iterables;
 
@@ -24,6 +25,9 @@ public interface CollisionGetterMixin {
             CallbackInfoReturnable<Iterable<VoxelShape>> cir
     ) {
         if (!((Object) this instanceof ServerLevel level)) {
+            return;
+        }
+        if (entity != null && SubLevelEntityBridge.isRegisteredAttachedEntity(level, entity)) {
             return;
         }
 

@@ -1170,6 +1170,59 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
         return removed;
     }
 
+    public synchronized int buildTerrainCollisionAround(ServerLevel level, BlockPos center, int chunkRadius) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(center, "center");
+        if (chunkRadius < 0) {
+            throw new IllegalArgumentException("chunkRadius must be non-negative");
+        }
+
+        ServerPhysicsScene scene = sceneFor(level);
+        int centerChunkX = Math.floorDiv(center.getX(), 16);
+        int centerChunkZ = Math.floorDiv(center.getZ(), 16);
+        TerrainChunkBuildAccumulator accumulator = new TerrainChunkBuildAccumulator();
+
+        accumulator.add(buildLoadedTerrainChunkIfNeeded(level, scene, ChunkPos.asLong(centerChunkX, centerChunkZ)));
+        for (int radius = 1; radius <= chunkRadius; radius++) {
+            for (int dx = -radius; dx <= radius; dx++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    if (Math.abs(dx) != radius && Math.abs(dz) != radius) {
+                        continue;
+                    }
+                    accumulator.add(buildLoadedTerrainChunkIfNeeded(level, scene, ChunkPos.asLong(centerChunkX + dx, centerChunkZ + dz)));
+                }
+            }
+        }
+
+        if (accumulator.chunksBuilt() > 0) {
+            lastTerrainChunkBuildCount = accumulator.chunksBuilt();
+            lastTerrainColliderBuildCount = accumulator.collidersBuilt();
+            lastTerrainPartialColliderBuildCount = accumulator.partialCollidersBuilt();
+            lastTerrainBuildNanos = accumulator.buildNanos();
+        }
+        return accumulator.chunksBuilt();
+    }
+
+    private TerrainChunkBuildResult buildLoadedTerrainChunkIfNeeded(ServerLevel level, ServerPhysicsScene scene, long chunkKey) {
+        if (!isChunkSafeToInspect(level, chunkKey)) {
+            return null;
+        }
+
+        String sceneKey = scene.sceneKey();
+        TerrainChunkBuildState existingState = terrainChunkBuildStates
+                .computeIfAbsent(sceneKey, ignored -> new LinkedHashMap<>())
+                .computeIfAbsent(chunkKey, ignored -> new TerrainChunkBuildState());
+        if (existingState.status() == TerrainChunkBuildStatus.BUILT) {
+            removeTerrainChunkBuildQueueEntry(sceneKey, chunkKey);
+            return null;
+        }
+
+        TerrainChunkBuildResult result = buildTerrainChunk(level, scene, chunkKey);
+        existingState.markBuilt(result.created(), result.buildNanos());
+        removeTerrainChunkBuildQueueEntry(sceneKey, chunkKey);
+        return result;
+    }
+
     private int createTerrainCollider(
             ServerPhysicsScene scene,
             long chunkKey,
@@ -1266,6 +1319,17 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
             if (states.isEmpty()) {
                 terrainChunkBuildStates.remove(sceneKey);
             }
+        }
+    }
+
+    private void removeTerrainChunkBuildQueueEntry(String sceneKey, long chunkKey) {
+        LinkedHashSet<Long> queue = terrainBuildQueues.get(sceneKey);
+        if (queue == null) {
+            return;
+        }
+        queue.remove(chunkKey);
+        if (queue.isEmpty()) {
+            terrainBuildQueues.remove(sceneKey);
         }
     }
 
@@ -1689,6 +1753,39 @@ public final class ServerPhysicsRuntime implements AutoCloseable {
     }
 
     private record TerrainChunkBuildResult(int created, int removed, int partialCreated, long buildNanos) {
+    }
+
+    private static final class TerrainChunkBuildAccumulator {
+        private int chunksBuilt;
+        private int collidersBuilt;
+        private int partialCollidersBuilt;
+        private long buildNanos;
+
+        private void add(TerrainChunkBuildResult result) {
+            if (result == null) {
+                return;
+            }
+            chunksBuilt++;
+            collidersBuilt += result.created();
+            partialCollidersBuilt += result.partialCreated();
+            buildNanos += result.buildNanos();
+        }
+
+        private int chunksBuilt() {
+            return chunksBuilt;
+        }
+
+        private int collidersBuilt() {
+            return collidersBuilt;
+        }
+
+        private int partialCollidersBuilt() {
+            return partialCollidersBuilt;
+        }
+
+        private long buildNanos() {
+            return buildNanos;
+        }
     }
 
     private record ActiveObjectTerrainQueueResult(int snapshotCount, int dynamicCount, int skippedByHeight, int queuedTerrainChunks) {
