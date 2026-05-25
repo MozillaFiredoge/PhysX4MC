@@ -5,10 +5,8 @@ NVIDIA PhysX-backed mechanics layer. Its current focus is sublevels: detached
 block assemblies that keep Minecraft's block logic, redstone, block entities,
 collision, interaction, and persistence while being driven by a physics body.
 
-This project is not trying to become a full Create: Aeronautics or Valkyrien
-Skies-style gameplay ecosystem. The goal is a smaller physics substrate where
-Minecraft can keep owning most vanilla logic, while PhysX owns rigid body
-movement and collision.
+The goal is a small physics substrate where Minecraft keeps owning most vanilla
+logic, while PhysX owns rigid body movement and collision.
 
 ## Status
 
@@ -138,6 +136,15 @@ coordinates no longer match physical world coordinates.
 
 For new work, prefer narrow compatibility fixes over broad rewrites. Add a
 focused repro first, then patch the specific bridge boundary that fails.
+
+## Third-party References
+
+- NVIDIA PhysX SDK: <https://github.com/NVIDIA-Omniverse/PhysX>
+- PhysX license: BSD-3-Clause, see
+  <https://github.com/NVIDIA-Omniverse/PhysX/blob/main/LICENSE.md>
+
+PhysX4mc uses PhysX through a native bridge. Third-party software remains under
+its own license terms.
 
 ## License
 
